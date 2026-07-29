@@ -9,6 +9,7 @@
   let toolbar = null;
   let resizeObserver = null;
   let mutationObserver = null;
+  let mutationTarget = null;
   let remountQueued = false;
   let generation = 0;
   let destroyed = false;
@@ -125,6 +126,7 @@
   }
 
   function mount() {
+    ensureMutationObserver();
     const nextToolbar = findToolbar();
     if (!nextToolbar) {
       removeRoot();
@@ -182,11 +184,24 @@
     });
   }
 
-  function startObservers() {
-    resizeObserver = new ResizeObserver(() => chooseMode());
-    mutationObserver = new MutationObserver(() => scheduleRemount());
+  function ensureMutationObserver() {
+    if (!mutationObserver) mutationObserver = new MutationObserver(() => scheduleRemount());
     const target = document.body ?? document.documentElement;
-    if (target) mutationObserver.observe(target, { childList: true, subtree: true });
+    if (!target || mutationTarget === target) return Boolean(mutationTarget);
+    mutationObserver.disconnect();
+    try {
+      mutationObserver.observe(target, { childList: true, subtree: true });
+      mutationTarget = target;
+      return true;
+    } catch {
+      mutationTarget = null;
+      return false;
+    }
+  }
+
+  function startObservers() {
+    if (!resizeObserver) resizeObserver = new ResizeObserver(() => chooseMode());
+    ensureMutationObserver();
   }
 
   function status() {
@@ -199,7 +214,7 @@
       generation += 1;
       fullText = typeof display?.fullText === "string" ? display.fullText : "";
       compactText = typeof display?.compactText === "string" ? display.compactText : "";
-      if (!mutationObserver) startObservers();
+      startObservers();
       if (!fullText || !compactText || !mount()) return status();
       return status();
     },
@@ -216,6 +231,7 @@
       compactText = "";
       resizeObserver?.disconnect();
       mutationObserver?.disconnect();
+      mutationTarget = null;
       removeRoot();
       delete window[GLOBAL_KEY];
     },

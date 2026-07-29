@@ -15,6 +15,9 @@ test("renderer injection is non-networked, non-interactive, and uniquely marked"
   assert.match(source, /MutationObserver/);
   assert.match(source, /Math\.abs\(window\.innerWidth - rect\.right\) <= 24/);
   assert.match(source, /document\.body \?\? document\.documentElement/);
+  assert.match(source, /let mutationTarget = null/);
+  assert.match(source, /function ensureMutationObserver\(\)/);
+  assert.doesNotMatch(source, /if \(!mutationObserver\) startObservers\(\)/);
   assert.match(source, /fullText !== expectedFullText/);
   assert.match(source, /pointer-events:\s*none/);
   assert.doesNotMatch(source, /\bfetch\s*\(/);
