@@ -22,6 +22,7 @@ export function createInjectionController(session, injectSource, logger) {
       awaitPromise: true,
       returnByValue: true,
     });
+    if (result?.exceptionDetails) throw new Error("CDP 页面执行失败");
     return result?.result?.value ?? NOT_MOUNTED;
   }
 
