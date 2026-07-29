@@ -77,6 +77,9 @@ export function buildDisplayText(snapshot, options = {}) {
     if (snapshot.expiresAtMs !== null) {
       fullText += `（最近一次重置到期：${dateParts(snapshot.expiresAtMs, locale, timeZone, false)}）`;
     }
+  } else if (snapshot.resetCount !== 0) {
+    fullText += "｜剩余重置次数：未知";
+    compactText += "｜↻（?）";
   }
   return { fullText, compactText };
 }

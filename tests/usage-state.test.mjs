@@ -27,6 +27,14 @@ test("formats approved full and compact copy and hides resets at zero", () => {
 test("keeps a positive reset count when expiry detail has not been observed", () => {
   const text = buildDisplayText({ accountKey: null, remainingPercent: 66, resetAtMs: Date.parse("2026-08-05T12:09:00+08:00"), resetCount: 1, expiresAtMs: null }, { locale: "zh-CN", timeZone: "Asia/Shanghai" }); assert.equal(text.fullText, "用量：每周 66%（8 月 5 日 12:09 重置）｜剩余重置次数：1");
 });
+test("shows an explicit unknown reset count without attaching expiry detail", () => {
+  const text = buildDisplayText({ accountKey: null, remainingPercent: 66, resetAtMs: Date.parse("2026-08-05T12:09:00+08:00"), resetCount: null, expiresAtMs: Date.parse("2026-08-01T00:00:00+08:00") }, { locale: "zh-CN", timeZone: "Asia/Shanghai" });
+  assert.deepEqual(text, { fullText: "用量：每周 66%（8 月 5 日 12:09 重置）｜剩余重置次数：未知", compactText: "周 66%｜↻（?）" });
+});
+test("formats reset time in Asia Shanghai across a UTC date boundary", () => {
+  const text = buildDisplayText({ accountKey: null, remainingPercent: 66, resetAtMs: Date.parse("2026-08-01T17:09:00Z"), resetCount: 0, expiresAtMs: null }, { locale: "zh-CN", timeZone: "Asia/Shanghai" });
+  assert.equal(text.fullText, "用量：每周 66%（8 月 2 日 01:09 重置）");
+});
 test("clears expiry when the account changes", () => {
   const previous = { accountKey: "account-a", remainingPercent: 66, resetAtMs: 1, resetCount: 1, expiresAtMs: 2 }; const next = mergeObservedUsage(previous, { type: "usage", value: { accountKey: "account-b", remainingPercent: 90, resetAtMs: 3, resetCount: 2 } }); assert.equal(next.accountKey, "account-b"); assert.equal(next.expiresAtMs, null);
 });
