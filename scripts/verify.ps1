@@ -98,40 +98,57 @@ foreach ($relativePath in $expectedFiles) {
     }
 }
 
-$forbiddenDirectories = @(Get-ChildItem -LiteralPath $projectRoot -Recurse -Directory -Force -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -ieq 'node_modules' })
-foreach ($directory in $forbiddenDirectories) {
-    Add-VerificationFailure "发现禁止的依赖目录：$(Get-RelativeProjectPath $directory.FullName)"
+try {
+    $forbiddenDirectories = @(Get-ChildItem -LiteralPath $projectRoot -Recurse -Directory -Force -ErrorAction Stop |
+        Where-Object { $_.Name -ieq 'node_modules' })
+    foreach ($directory in $forbiddenDirectories) {
+        Add-VerificationFailure "发现禁止的依赖目录：$(Get-RelativeProjectPath $directory.FullName)"
+    }
+} catch {
+    Add-VerificationFailure "无法枚举依赖目录：$($_.Exception.Message)"
 }
 
-$forbiddenFiles = @(Get-ChildItem -LiteralPath $projectRoot -Recurse -File -Force -ErrorAction SilentlyContinue |
-    Where-Object {
-        $_.Name -ieq 'package-lock.json' -or
-        $_.Extension -iin @('.asar', '.node', '.dll', '.exe', '.tgz')
-    })
-foreach ($file in $forbiddenFiles) {
-    Add-VerificationFailure "发现禁止的第三方运行时或锁文件：$(Get-RelativeProjectPath $file.FullName)"
+try {
+    $forbiddenFiles = @(Get-ChildItem -LiteralPath $projectRoot -Recurse -File -Force -ErrorAction Stop |
+        Where-Object {
+            $_.Name -ieq 'package-lock.json' -or
+            $_.Extension -iin @('.asar', '.node', '.dll', '.exe', '.tgz')
+        })
+    foreach ($file in $forbiddenFiles) {
+        Add-VerificationFailure "发现禁止的第三方运行时或锁文件：$(Get-RelativeProjectPath $file.FullName)"
+    }
+} catch {
+    Add-VerificationFailure "无法枚举第三方运行时或锁文件：$($_.Exception.Message)"
 }
 
 if ($null -ne $script:nodePath) {
-    $syntaxFiles = @(
-        Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src') -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Extension -ieq '.mjs' -or $_.Name -ieq 'inject.js' } |
-        Sort-Object FullName
-    )
+    try {
+        $syntaxFiles = @(
+            Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src') -Recurse -File -ErrorAction Stop
+            Get-ChildItem -LiteralPath (Join-Path $projectRoot 'tests') -Recurse -File -ErrorAction Stop
+        ) | Where-Object { $_.Extension -ieq '.mjs' -or $_.Name -ieq 'inject.js' } |
+            Sort-Object FullName
+    } catch {
+        $syntaxFiles = @()
+        Add-VerificationFailure "无法枚举语法检查文件：$($_.Exception.Message)"
+    }
     foreach ($file in $syntaxFiles) {
         if (Invoke-NodeCheck "语法检查失败：$(Get-RelativeProjectPath $file.FullName)" @('--check', $file.FullName)) {
             $syntaxChecked += 1
         }
     }
 
-    $testFiles = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'tests') -Filter '*.test.mjs' -File -ErrorAction SilentlyContinue |
-        Sort-Object FullName |
-        Select-Object -ExpandProperty FullName)
-    if ($testFiles.Count -eq 0) {
-        Add-VerificationFailure '未找到任何聚焦测试文件。'
-    } elseif (Invoke-NodeCheck '聚焦测试失败' (@('--test') + $testFiles)) {
-        $testsRun = $testFiles.Count
+    try {
+        $testFiles = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'tests') -Filter '*.test.mjs' -File -ErrorAction Stop |
+            Sort-Object FullName |
+            Select-Object -ExpandProperty FullName)
+        if ($testFiles.Count -eq 0) {
+            Add-VerificationFailure '未找到任何聚焦测试文件。'
+        } elseif (Invoke-NodeCheck '聚焦测试失败' (@('--test') + $testFiles)) {
+            $testsRun = $testFiles.Count
+        }
+    } catch {
+        Add-VerificationFailure "无法枚举聚焦测试文件：$($_.Exception.Message)"
     }
 
     [void](Invoke-NodeCheck 'Codex AppX 发现失败' @((Join-Path $projectRoot 'src/windows-codex.mjs'), '--discover-only'))
@@ -159,18 +176,40 @@ if (-not [string]::IsNullOrWhiteSpace($InstalledRoot)) {
             throw "安装目录不存在：$installedRootPath"
         }
         $sourceFiles = @(
-            Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src') -Recurse -File
-            Get-ChildItem -LiteralPath (Join-Path $projectRoot 'scripts') -Recurse -File
+            Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src') -Recurse -File -ErrorAction Stop
+            Get-ChildItem -LiteralPath (Join-Path $projectRoot 'scripts') -Recurse -File -ErrorAction Stop
         )
+        $installedFiles = @(
+            Get-ChildItem -LiteralPath (Join-Path $installedRootPath 'src') -Recurse -File -ErrorAction Stop
+            Get-ChildItem -LiteralPath (Join-Path $installedRootPath 'scripts') -Recurse -File -ErrorAction Stop
+        )
+        $sourceFileMap = @{}
+        foreach ($sourceFile in $sourceFiles) {
+            $sourceFileMap[(Get-RelativeProjectPath $sourceFile.FullName)] = $sourceFile
+        }
+        $installedFileMap = @{}
+        foreach ($installedFile in $installedFiles) {
+            $relativePath = [IO.Path]::GetRelativePath($installedRootPath, $installedFile.FullName).Replace('\', '/')
+            $installedFileMap[$relativePath] = $installedFile
+        }
+        foreach ($relativePath in $sourceFileMap.Keys) {
+            if (-not $installedFileMap.ContainsKey($relativePath)) {
+                Add-VerificationFailure "已安装文件缺失：$relativePath"
+            }
+        }
+        foreach ($relativePath in $installedFileMap.Keys) {
+            if (-not $sourceFileMap.ContainsKey($relativePath)) {
+                Add-VerificationFailure "已安装副本含有额外文件：$relativePath"
+            }
+        }
         foreach ($sourceFile in $sourceFiles) {
             $relativePath = Get-RelativeProjectPath $sourceFile.FullName
-            $installedFile = Join-Path $installedRootPath ($relativePath.Replace('/', '\'))
-            if (-not (Test-Path -LiteralPath $installedFile -PathType Leaf)) {
-                Add-VerificationFailure "已安装文件缺失：$relativePath"
+            if (-not $installedFileMap.ContainsKey($relativePath)) {
                 continue
             }
+            $installedFile = $installedFileMap[$relativePath]
             $sourceHash = (Get-FileHash -Path $sourceFile.FullName -Algorithm SHA256).Hash
-            $installedHash = (Get-FileHash -Path $installedFile -Algorithm SHA256).Hash
+            $installedHash = (Get-FileHash -Path $installedFile.FullName -Algorithm SHA256).Hash
             if ($sourceHash -cne $installedHash) {
                 Add-VerificationFailure "已安装文件哈希不一致：$relativePath"
                 continue

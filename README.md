@@ -28,14 +28,20 @@
 
 插件绝不会主动请求 `/wham/usage` 或 `/wham/rate-limit-reset-credits`，也没有独立的额度刷新定时器。因此，最近一次重置到期日是可选信息：只有 Codex 自己请求并返回了重置券明细后才会出现。
 
-## 安装、验证与卸载
+## 安装
 
-在项目根目录使用 PowerShell 7：
+在项目根目录使用 PowerShell 7 安装：
 
 ```powershell
 & .\scripts\install.ps1
+```
+
+## 验证
+
+在项目根目录使用 PowerShell 7 验证：
+
+```powershell
 & .\scripts\verify.ps1
-& .\scripts\uninstall.ps1
 ```
 
 如需校验实际安装副本：
@@ -43,6 +49,14 @@
 ```powershell
 $installRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'CodexUsageToolbar'
 & .\scripts\verify.ps1 -InstalledRoot $installRoot
+```
+
+## 卸载
+
+确认不再需要该插件后，在项目根目录使用 PowerShell 7 卸载：
+
+```powershell
+& .\scripts\uninstall.ps1
 ```
 
 ## 真实验收边界与回退
