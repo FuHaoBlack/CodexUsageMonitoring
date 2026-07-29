@@ -7,7 +7,7 @@ import path from "node:path";
 const execFileDefault = promisify(execFileCallback);
 const POWERSHELL = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
 const APPX_COMMAND = "Get-AppxPackage -Name OpenAI.Codex | Sort-Object Version -Descending | Select-Object -First 1 InstallLocation, Version | ConvertTo-Json -Compress";
-const PROCESS_COMMAND = "Get-CimInstance Win32_Process -Filter \\\"Name='Codex.exe'\\\" | Select-Object ProcessId, ExecutablePath | ConvertTo-Json -Compress";
+const PROCESS_COMMAND = 'Get-CimInstance Win32_Process -Filter "Name=\'Codex.exe\'" | Select-Object ProcessId, ExecutablePath | ConvertTo-Json -Compress';
 
 function stdoutOf(result) {
   return typeof result === "string" ? result : result?.stdout;
@@ -19,7 +19,7 @@ export function parseAppxDiscoveryOutput(text) {
   if (Array.isArray(parsed)) parsed = parsed[0];
   const installLocation = typeof parsed?.InstallLocation === "string" ? parsed.InstallLocation : null;
   const version = typeof parsed?.Version === "string" ? parsed.Version : null;
-  if (!installLocation || !version) throw new Error("未找到有效的 Codex AppX 安装信息");
+  if (!installLocation || !version || !path.win32.isAbsolute(installLocation) || !/^[A-Za-z]:\\/.test(installLocation) || !/^\d+(?:\.\d+)+$/.test(version)) throw new Error("未找到有效的 Codex AppX 安装信息");
   return { installLocation, version };
 }
 
@@ -57,6 +57,7 @@ export function reserveLoopbackPort() {
 }
 
 export function launchCodex(exePath, port, { spawn = spawnChild } = {}) {
+  validatePort(port);
   return spawn(exePath, ["--remote-debugging-address=127.0.0.1", `--remote-debugging-port=${port}`], {
     detached: false,
     stdio: "ignore",
@@ -64,28 +65,51 @@ export function launchCodex(exePath, port, { spawn = spawnChild } = {}) {
   });
 }
 
-function validTarget(target) {
+function validatePort(port) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("CDP 端口必须是 1 到 65535 的整数");
+}
+
+function validTarget(target, port) {
   if (target?.type !== "page" || typeof target?.url !== "string" || typeof target?.webSocketDebuggerUrl !== "string") return false;
   if (target.url.startsWith("devtools:")) return false;
   try {
     const url = new URL(target.webSocketDebuggerUrl);
-    return url.protocol === "ws:" && url.hostname === "127.0.0.1";
+    return url.protocol === "ws:" && url.hostname === "127.0.0.1" && url.port === String(port);
   } catch { return false; }
 }
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+async function beforeDeadline(factory, deadline) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new Error("CDP 启动超时");
+  const controller = new AbortController();
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => factory(controller.signal)),
+      new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error("CDP 启动超时")); }, remaining); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
 export async function waitForCdpTarget(port, { timeoutMs = 15000, retryMs = 250, fetch: fetchImpl = globalThis.fetch } = {}) {
+  validatePort(port);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !Number.isFinite(retryMs) || retryMs < 0) throw new Error("CDP 超时参数无效");
   const endpoint = `http://127.0.0.1:${port}/json/list`;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
     try {
-      const response = await fetchImpl(endpoint);
+      const response = await beforeDeadline((signal) => fetchImpl(endpoint, { signal, redirect: "error" }), deadline);
       if (response?.ok) {
-        const target = (await response.json()).find(validTarget);
+        const targets = await beforeDeadline(() => response.json(), deadline);
+        const target = Array.isArray(targets) ? targets.find((candidate) => validTarget(candidate, port)) : null;
         if (target) return { webSocketDebuggerUrl: target.webSocketDebuggerUrl };
       }
-    } catch { /* CDP 尚未可用，继续等待启动窗口。 */ }
+    } catch (error) {
+      if (error?.message === "CDP 启动超时") throw error;
+      // CDP 尚未可用，继续等待启动窗口。
+    }
     if (Date.now() >= deadline) break;
     await delay(retryMs);
   }
@@ -93,8 +117,9 @@ export async function waitForCdpTarget(port, { timeoutMs = 15000, retryMs = 250,
 }
 
 export async function isCdpEndpointAlive(port, { fetch: fetchImpl = globalThis.fetch } = {}) {
+  validatePort(port);
   try {
-    const response = await fetchImpl(`http://127.0.0.1:${port}/json/version`);
+    const response = await fetchImpl(`http://127.0.0.1:${port}/json/version`, { redirect: "error" });
     return Boolean(response?.ok);
   } catch { return false; }
 }

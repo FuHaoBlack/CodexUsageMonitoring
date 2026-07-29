@@ -30,10 +30,18 @@ test("discovers Codex executable from selected AppX metadata", async () => {
 });
 
 test("returns only Codex process identity without command lines", async () => {
+  let invocation;
   const result = await findRunningCodexMainProcesses({
-    execFile: async () => JSON.stringify([{ ProcessId: 42, ExecutablePath: "C:\\Apps\\Codex\\app\\Codex.exe" }]),
+    execFile: async (...args) => {
+      invocation = args;
+      return JSON.stringify([{ ProcessId: 42, ExecutablePath: "C:\\Apps\\Codex\\app\\Codex.exe" }]);
+    },
   });
   assert.deepEqual(result, [{ pid: 42, executablePath: "C:\\Apps\\Codex\\app\\Codex.exe" }]);
+  assert.match(invocation[1].join(" "), /-Filter "Name='Codex\.exe'"/);
+  assert.doesNotMatch(invocation[1].join(" "), /\\/);
+  assert.match(invocation[1].at(-1), /Select-Object ProcessId, ExecutablePath/);
+  assert.doesNotMatch(invocation[1].at(-1), /CommandLine/);
 });
 
 test("reserves a currently free TCP port on loopback and releases the socket", async () => {
@@ -53,6 +61,12 @@ test("launches with loopback-only CDP arguments and safe child options", () => {
   }]);
 });
 
+test("rejects invalid CDP ports before launching or discovering", async () => {
+  assert.throws(() => launchCodex("C:\\Apps\\Codex.exe", 0, { spawn: () => { throw new Error("must not spawn"); } }), /端口/);
+  await assert.rejects(waitForCdpTarget(65536, { fetch: () => { throw new Error("must not fetch"); } }), /端口/);
+  await assert.rejects(isCdpEndpointAlive(1.2, { fetch: () => { throw new Error("must not fetch"); } }), /端口/);
+});
+
 test("selects only a non-DevTools local page target", async () => {
   const target = await waitForCdpTarget(4567, {
     timeoutMs: 20,
@@ -62,11 +76,11 @@ test("selects only a non-DevTools local page target", async () => {
       return { ok: true, json: async () => [
         { type: "page", url: "devtools://devtools/bundled/inspector.html", webSocketDebuggerUrl: "ws://127.0.0.1/devtools" },
         { type: "page", url: "file:///app/index.html", webSocketDebuggerUrl: "ws://192.168.1.2/page" },
-        { type: "page", url: "file:///app/index.html", webSocketDebuggerUrl: "ws://127.0.0.1/page" },
+        { type: "page", url: "file:///app/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:4567/page" },
       ] };
     },
   });
-  assert.deepEqual(target, { webSocketDebuggerUrl: "ws://127.0.0.1/page" });
+  assert.deepEqual(target, { webSocketDebuggerUrl: "ws://127.0.0.1:4567/page" });
 });
 
 test("times out when no eligible CDP target appears", async () => {
@@ -75,6 +89,32 @@ test("times out when no eligible CDP target appears", async () => {
     retryMs: 1,
     fetch: async () => ({ ok: true, json: async () => [{ type: "page", url: "devtools://devtools", webSocketDebuggerUrl: "ws://127.0.0.1/devtools" }] }),
   }), /CDP 启动超时/);
+});
+
+test("rejects a target whose loopback WebSocket port differs from discovery", async () => {
+  await assert.rejects(waitForCdpTarget(4567, {
+    timeoutMs: 5, retryMs: 1,
+    fetch: async () => ({ ok: true, json: async () => [{ type: "page", url: "file:///app", webSocketDebuggerUrl: "ws://127.0.0.1:4568/page" }] }),
+  }), /CDP 启动超时/);
+});
+
+test("enforces the total CDP deadline when fetch or JSON parsing never settles", async () => {
+  const pending = new Promise(() => {});
+  const started = Date.now();
+  await assert.rejects(waitForCdpTarget(4567, { timeoutMs: 15, retryMs: 1, fetch: async () => pending }), /CDP 启动超时/);
+  assert.ok(Date.now() - started < 200);
+  await assert.rejects(waitForCdpTarget(4567, {
+    timeoutMs: 15, retryMs: 1,
+    fetch: async () => ({ ok: true, json: async () => pending }),
+  }), /CDP 启动超时/);
+});
+
+test("rejects malformed AppX discovery records and executable paths", async () => {
+  for (const value of ["", "not json", "{}", JSON.stringify({ InstallLocation: "relative", Version: "26.1" }), JSON.stringify({ InstallLocation: "C:\\Apps", Version: "v26" })]) {
+    assert.throws(() => parseAppxDiscoveryOutput(value), /安装信息/);
+  }
+  await assert.rejects(discoverCodexInstallation({ execFile: async () => JSON.stringify({ InstallLocation: "C:\\Apps", Version: "26.1.0.0" }), stat: async () => { throw new Error("missing"); } }), /可执行文件/);
+  await assert.rejects(discoverCodexInstallation({ execFile: async () => JSON.stringify({ InstallLocation: "C:\\Apps", Version: "26.1.0.0" }), stat: async () => ({ isFile: () => false }) }), /可执行文件/);
 });
 
 test("treats local CDP discovery failures as unavailable", async () => {
