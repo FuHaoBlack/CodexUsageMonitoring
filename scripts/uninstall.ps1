@@ -51,6 +51,14 @@ $programsRoot = Get-ExactChildPath $startMenuRoot 'Programs' '开始菜单 Progr
 $shortcutPath = Get-ExactChildPath $programsRoot 'Codex（用量显示）.lnk' '开始菜单快捷方式'
 $launcherPath = Get-ExactChildPath (Get-ExactChildPath $installRoot 'src' '已安装源目录') 'launcher.mjs' '已安装启动模块'
 $startScriptPath = Get-ExactChildPath (Get-ExactChildPath $installRoot 'scripts' '已安装脚本目录') 'start.ps1' '已安装启动脚本'
+
+if ($WhatIfPreference) {
+    [void]$PSCmdlet.ShouldProcess($shortcutPath, '删除 Codex（用量显示）开始菜单快捷方式')
+    [void]$PSCmdlet.ShouldProcess($installRoot, '删除当前用户的 CodexUsageToolbar 安装目录')
+    Write-Host 'WhatIf：真实卸载会先枚举并停止严格匹配的 helper；本次 WhatIf 未枚举或停止进程。'
+    return
+}
+
 $allowedNames = @('node.exe', 'node', 'pwsh.exe', 'pwsh', 'powershell.exe', 'powershell')
 
 $allProcesses = $null
@@ -84,8 +92,4 @@ if ($PSCmdlet.ShouldProcess($installRoot, '删除当前用户的 CodexUsageToolb
     }
 }
 
-if ($WhatIfPreference) {
-    Write-Host 'WhatIf：未执行卸载，官方 Codex、其原始快捷方式和账户数据均未修改。'
-} else {
-    Write-Host '卸载完成：未修改官方 Codex、其原始快捷方式或任何账户数据。'
-}
+Write-Host '卸载完成：未修改官方 Codex、其原始快捷方式或任何账户数据。'
