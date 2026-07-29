@@ -37,11 +37,18 @@ export class UsageObserver {
       return;
     }
 
+    if (method === "Network.loadingFailed") {
+      const requestId = params?.requestId;
+      if (typeof requestId === "string") this.requests.delete(requestId);
+      return;
+    }
+
     if (method !== "Network.responseReceived") return;
     const requestId = params?.requestId;
     if (typeof requestId !== "string") return;
     const request = this.requests.get(requestId);
     if (!request) return;
+    this.requests.delete(requestId);
 
     try {
       const response = params.response;
@@ -63,9 +70,15 @@ export class UsageObserver {
         await this.onResetCreditsPayload(payload);
       }
     } catch (error) {
-      this.onError(error);
-    } finally {
-      this.requests.delete(requestId);
+      await this.#notifyError(error);
+    }
+  }
+
+  async #notifyError(error) {
+    try {
+      await this.onError(error);
+    } catch {
+      // 错误回调不应产生未处理拒绝。
     }
   }
 }

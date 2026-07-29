@@ -7,10 +7,15 @@ export class CdpSession {
     this.socket = socket;
     this.onEvent = onEvent;
     this.onClose = onClose;
-    socket.addEventListener?.("message", (event) => this.#receive(event.data));
-    socket.addEventListener?.("close", () => this.#handleClose());
-    socket.on?.("message", (data) => this.#receive(data));
-    socket.on?.("close", () => this.#handleClose());
+    if (socket.addEventListener) {
+      socket.addEventListener("message", (event) => this.#receive(event.data));
+      socket.addEventListener("close", () => this.#terminate("CDP 会话已关闭"));
+      socket.addEventListener("error", () => this.#terminate("CDP 连接发生错误"));
+    } else if (socket.on) {
+      socket.on("message", (data) => this.#receive(data));
+      socket.on("close", () => this.#terminate("CDP 会话已关闭"));
+      socket.on("error", () => this.#terminate("CDP 连接发生错误"));
+    }
   }
 
   send(method, params = {}) {
@@ -32,7 +37,7 @@ export class CdpSession {
   }
 
   close() {
-    this.#handleClose();
+    this.#terminate("CDP 会话已关闭");
     this.socket.close?.();
   }
 
@@ -58,17 +63,25 @@ export class CdpSession {
     }
 
     if (typeof message.method === "string") {
-      this.onEvent(message.method, message.params);
+      this.#notify(this.onEvent, message.method, message.params);
     }
   }
 
-  #handleClose() {
+  #terminate(message) {
     if (this.#closed) return;
     this.#closed = true;
     for (const { reject } of this.#pending.values()) {
-      reject(new Error("CDP 会话已关闭"));
+      reject(new Error(message));
     }
     this.#pending.clear();
-    this.onClose();
+    this.#notify(this.onClose);
+  }
+
+  #notify(callback, ...args) {
+    try {
+      Promise.resolve(callback(...args)).catch(() => {});
+    } catch {
+      // 用户回调不应破坏 CDP 事件循环。
+    }
   }
 }

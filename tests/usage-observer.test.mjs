@@ -107,3 +107,88 @@ test("ignores POST even when the URL is an allowed usage endpoint", async () => 
 
   assert.equal(bodyReads, 0);
 });
+
+test("forgets a request when network loading fails", async () => {
+  let bodyReads = 0;
+  const observer = new UsageObserver({
+    async send() { bodyReads += 1; return {}; },
+  }, {
+    onUsagePayload: assert.fail,
+    onResetCreditsPayload: assert.fail,
+    onError: assert.fail,
+  });
+
+  await observer.handleEvent("Network.requestWillBeSent", {
+    requestId: "failed-1",
+    request: { method: "GET", url: "https://chatgpt.com/backend-api/wham/usage" },
+  });
+  await observer.handleEvent("Network.loadingFailed", { requestId: "failed-1" });
+  await observer.handleEvent(
+    "Network.responseReceived",
+    responseEvent("https://chatgpt.com/backend-api/wham/usage", "failed-1"),
+  );
+
+  assert.equal(bodyReads, 0);
+});
+
+test("reads a response body once when duplicate response events arrive", async () => {
+  let bodyReads = 0;
+  let releaseBody;
+  const body = new Promise((resolve) => { releaseBody = resolve; });
+  const observer = new UsageObserver({
+    async send(method) {
+      if (method === "Network.getResponseBody") {
+        bodyReads += 1;
+        return body;
+      }
+      return {};
+    },
+  }, {
+    onUsagePayload: () => {},
+    onResetCreditsPayload: assert.fail,
+    onError: assert.fail,
+  });
+  const event = responseEvent("https://chatgpt.com/backend-api/wham/usage", "duplicate-1");
+
+  await observer.handleEvent("Network.requestWillBeSent", {
+    requestId: "duplicate-1",
+    request: { method: "GET", url: "https://chatgpt.com/backend-api/wham/usage" },
+  });
+  const first = observer.handleEvent("Network.responseReceived", event);
+  const second = observer.handleEvent("Network.responseReceived", event);
+  releaseBody({ body: JSON.stringify({ rate_limit: {} }), base64Encoded: false });
+  await Promise.all([first, second]);
+
+  assert.equal(bodyReads, 1);
+});
+
+test("reports observer errors without leaking an onError rejection", async () => {
+  const unhandled = [];
+  const capture = (reason) => unhandled.push(reason);
+  process.on("unhandledRejection", capture);
+  let errorCount = 0;
+  const observer = new UsageObserver({
+    async send() { throw new Error("body read failure"); },
+  }, {
+    onUsagePayload: assert.fail,
+    onResetCreditsPayload: assert.fail,
+    onError: async () => {
+      errorCount += 1;
+      throw new Error("error callback failure");
+    },
+  });
+
+  await observer.handleEvent("Network.requestWillBeSent", {
+    requestId: "error-1",
+    request: { method: "GET", url: "https://chatgpt.com/backend-api/wham/usage" },
+  });
+  await observer.handleEvent(
+    "Network.responseReceived",
+    responseEvent("https://chatgpt.com/backend-api/wham/usage", "error-1"),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  process.off("unhandledRejection", capture);
+
+  assert.equal(errorCount, 1);
+  assert.deepEqual(unhandled, []);
+});
