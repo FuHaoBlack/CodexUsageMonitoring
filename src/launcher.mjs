@@ -83,8 +83,23 @@ export async function connectGlobalWebSocket(url, { WebSocketImpl = globalThis.W
 
 function noOp() {}
 
+function withinDeadline(factory, timeoutMs, onLateValue = noOp, cancelled = null) {
+  let expired = false;
+  let timer;
+  const operation = Promise.resolve().then(factory);
+  operation.then((value) => { if (expired) onLateValue(value); }).catch(noOp);
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      expired = true;
+      reject(new Error("CDP 连接超时"));
+    }, timeoutMs);
+  });
+  return Promise.race(cancelled ? [operation, deadline, cancelled] : [operation, deadline]).finally(() => clearTimeout(timer));
+}
+
 export async function runLauncher(options = {}, deps = {}) {
-  const runtime = { now: Date.now, sleep, ...deps };
+  const monotonicNow = globalThis.performance?.now?.bind(globalThis.performance) ?? Date.now;
+  const runtime = { now: monotonicNow, sleep, ...deps };
   const startupTimeoutMs = options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS;
   const healthWindowMs = options.healthWindowMs ?? HEALTH_WINDOW_MS;
   const recoveryPollMs = options.recoveryPollMs ?? RECOVERY_POLL_MS;
@@ -106,6 +121,7 @@ export async function runLauncher(options = {}, deps = {}) {
   let reinstalling = false;
   let nextGeneration = 0;
   let activeGeneration = 0;
+  let cancelConnectionAttempt = noOp;
   let supervisorPromise = null;
   let eventQueue = Promise.resolve();
   let finishPromise = null;
@@ -137,6 +153,7 @@ export async function runLauncher(options = {}, deps = {}) {
     finishPromise = (async () => {
       finished = true;
       activeGeneration = ++nextGeneration;
+      cancelConnectionAttempt();
       removeSignals();
       await boundedClear();
       try { session?.close?.(); } catch { /* 仅关闭辅助 CDP 会话。 */ }
@@ -213,47 +230,82 @@ export async function runLauncher(options = {}, deps = {}) {
     return eventQueue;
   };
 
-  async function establishConnection() {
+  async function establishConnection({ timeoutMs }) {
+    cancelConnectionAttempt();
     const generation = ++nextGeneration;
     activeGeneration = generation;
-    const target = await runtime.waitForCdpTarget(port, { timeoutMs: startupTimeoutMs });
-    if (!isActive(generation)) return false;
-    const socket = await runtime.connectWebSocket(target.webSocketDebuggerUrl, { timeoutMs: startupTimeoutMs });
-    if (!isActive(generation)) {
-      try { socket.close?.(); } catch { /* 仅关闭过期辅助连接。 */ }
-      return false;
-    }
-    let localObserver = null;
-    const localSession = runtime.sessionFactory(socket, {
-      onEvent: (method, params) => dispatchEvent(generation, localObserver, method, params),
-      onClose: () => {
-        if (!isActive(generation)) return;
+    let rejectCancelled;
+    const cancelled = new Promise((_, reject) => { rejectCancelled = reject; });
+    const cancelThisAttempt = () => rejectCancelled(new Error("CDP 连接已取消"));
+    cancelConnectionAttempt = cancelThisAttempt;
+    let localSocket = null;
+    let localSession = null;
+    const canPublish = () => isActive(generation) && !childExited;
+    const discardLocal = () => {
+      if (session === localSession) {
+        session = null;
+        observer = null;
+        controller = null;
+      }
+      if (!finished) {
+        try { localSession?.close?.(); } catch { /* 局部会话清理。 */ }
+        try { localSocket?.close?.(); } catch { /* 局部 socket 清理。 */ }
+      }
+    };
+    try {
+      const target = await withinDeadline(
+        () => runtime.waitForCdpTarget(port, { timeoutMs }),
+        timeoutMs,
+        noOp,
+        cancelled,
+      );
+      if (!canPublish()) return false;
+      localSocket = await withinDeadline(
+        () => runtime.connectWebSocket(target.webSocketDebuggerUrl, { timeoutMs }),
+        timeoutMs,
+        (socket) => { try { socket?.close?.(); } catch { /* 迟到 socket 清理。 */ } },
+        cancelled,
+      );
+      if (!canPublish()) return false;
+      let localObserver = null;
+      localSession = runtime.sessionFactory(localSocket, {
+        onEvent: (method, params) => dispatchEvent(generation, localObserver, method, params),
+        onClose: () => {
+          if (!isActive(generation)) return;
+          cdpAlive = false;
+          scheduleSupervisor();
+        },
+      });
+      if (!canPublish()) return false;
+      localObserver = runtime.observerFactory(localSession, {
+        onUsagePayload: (payload) => handleUsagePayload(generation, payload),
+        onResetCreditsPayload: (payload) => handleResetCreditsPayload(generation, payload),
+        onError: noOp,
+      });
+      const localController = runtime.injectionFactory(localSession, options.injectSource ?? "", { info: (event) => safeInfo(event) });
+      session = localSession;
+      observer = localObserver;
+      controller = localController;
+      await localObserver.start();
+      if (!canPublish()) return false;
+      const status = await localController.install();
+      if (!canPublish()) return false;
+      cdpAlive = true;
+      unavailableSince = null;
+      if (currentSnapshot) await localController.update(buildDisplayText(currentSnapshot));
+      await safeInfo("cdp_connected");
+      if (status?.mounted) await safeInfo("toolbar_injection_verified", { mounted: true, mode: status.mode ?? null });
+      return true;
+    } catch (error) {
+      if (isActive(generation)) {
+        activeGeneration = ++nextGeneration;
         cdpAlive = false;
-        scheduleSupervisor();
-      },
-    });
-    if (!isActive(generation)) {
-      try { localSession?.close?.(); } catch { /* 过期连接无害关闭。 */ }
-      return false;
+      }
+      throw error;
+    } finally {
+      if (cancelConnectionAttempt === cancelThisAttempt) cancelConnectionAttempt = noOp;
+      if (!canPublish()) discardLocal();
     }
-    localObserver = runtime.observerFactory(localSession, {
-      onUsagePayload: (payload) => handleUsagePayload(generation, payload),
-      onResetCreditsPayload: (payload) => handleResetCreditsPayload(generation, payload),
-      onError: noOp,
-    });
-    await localObserver.start();
-    if (!isActive(generation)) return false;
-    const localController = runtime.injectionFactory(localSession, options.injectSource ?? "", { info: (event) => safeInfo(event) });
-    session = localSession;
-    observer = localObserver;
-    controller = localController;
-    const status = await localController.install();
-    if (!isActive(generation)) return false;
-    cdpAlive = true;
-    unavailableSince = null;
-    await safeInfo("cdp_connected");
-    if (status?.mounted) await safeInfo("toolbar_injection_verified", { mounted: true, mode: status.mode ?? null });
-    return true;
   }
 
   function scheduleSupervisor() {
@@ -263,16 +315,26 @@ export async function runLauncher(options = {}, deps = {}) {
         const observedAt = runtime.now();
         const baseline = childExited && unavailableSince !== null ? Math.max(childExitedAt, unavailableSince) : null;
         const remaining = baseline === null ? recoveryPollMs : Math.max(0, healthWindowMs - (observedAt - baseline));
-        const cap = Math.min(recoveryPollMs, remaining || recoveryPollMs);
+        if (baseline !== null && remaining === 0) {
+          await finish(0);
+          break;
+        }
+        const cap = Math.min(recoveryPollMs, remaining);
         const timeoutMs = Math.max(1, cap - 1);
-        const alive = await runtime.isCdpEndpointAlive(port, { timeoutMs });
+        let alive;
+        try {
+          alive = await runtime.isCdpEndpointAlive(port, { timeoutMs });
+        } catch {
+          try { await runtime.sleep(Math.min(recoveryPollMs, remaining)); } catch { await finish(5); }
+          continue;
+        }
         if (finished) break;
         const checkedAt = runtime.now();
         if (alive) {
           unavailableSince = null;
           if (!childExited && !cdpAlive) {
             try {
-              if (await establishConnection()) await safeInfo("renderer_reconnected");
+              if (await establishConnection({ timeoutMs })) await safeInfo("renderer_reconnected");
             } catch {
               cdpAlive = false;
             }
@@ -285,7 +347,16 @@ export async function runLauncher(options = {}, deps = {}) {
             break;
           }
         }
-        if (!finished && (childExited || !cdpAlive)) await runtime.sleep(recoveryPollMs);
+        if (!finished && (childExited || !cdpAlive)) {
+          const sleepMs = childExited && unavailableSince !== null
+            ? Math.min(recoveryPollMs, Math.max(0, healthWindowMs - (runtime.now() - Math.max(childExitedAt, unavailableSince))))
+            : recoveryPollMs;
+          if (sleepMs === 0) {
+            await finish(0);
+            break;
+          }
+          try { await runtime.sleep(sleepMs); } catch { await finish(5); }
+        }
       }
     })().catch(noOp).finally(() => {
       supervisorPromise = null;
@@ -320,16 +391,16 @@ export async function runLauncher(options = {}, deps = {}) {
     if (existing.length > 0) return fatal(2, FATAL_MESSAGES.codexAlreadyRunning);
     port = await runtime.reserveLoopbackPort();
     child = runtime.launchCodex(installation.exePath, port);
-    await safeInfo("codex_launched");
     bindChild();
     bindSignals();
-    const startup = establishConnection();
+    await safeInfo("codex_launched");
+    const startup = establishConnection({ timeoutMs: startupTimeoutMs });
     const startupResult = await Promise.race([
       startup.then((connected) => ({ connected })).catch(() => ({ connected: false })),
       completion.then((exitCode) => ({ exitCode })),
     ]);
     if (Object.hasOwn(startupResult, "exitCode")) return startupResult.exitCode;
-    if (!startupResult.connected) return fatal(4, FATAL_MESSAGES.cdpConnectionFailed);
+    if (!startupResult.connected) return childExited ? completion : fatal(4, FATAL_MESSAGES.cdpConnectionFailed);
     return completion;
   } catch {
     return finish(5);

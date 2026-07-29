@@ -369,3 +369,90 @@ test("an independent default top context clears and reinstalls the renderer", as
   assert.equal(harness.calls.clear, 2);
   assert.equal(harness.calls.installs, 2);
 });
+
+test("a pending reconnect target is bounded and a later child exit completes normally", { timeout: 500 }, async () => {
+  let now = 0;
+  let targets = 0;
+  const alive = [true, false, false, false];
+  const harness = createHarness({
+    now: () => now,
+    sleep: async (milliseconds) => { now += milliseconds; },
+    waitForCdpTarget: async () => {
+      targets += 1;
+      return targets === 1
+        ? { webSocketDebuggerUrl: "ws://127.0.0.1:4567/page" }
+        : new Promise(() => {});
+    },
+    isCdpEndpointAlive: async () => alive.shift() ?? false,
+  });
+  const running = runLauncher({ healthWindowMs: 20, recoveryPollMs: 10 }, harness.deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.sockets[0].emit("close");
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.child.emit("exit");
+
+  assert.equal(await running, 0);
+  assert.equal(targets, 2);
+});
+
+test("a rejected health probe waits before retrying instead of recursively spinning", async () => {
+  let probes = 0;
+  const sleeps = [];
+  const harness = createHarness({
+    isCdpEndpointAlive: async () => {
+      probes += 1;
+      if (probes === 1) throw new Error("fake health failure");
+      return true;
+    },
+    sleep: async (milliseconds) => { sleeps.push(milliseconds); },
+  });
+  const running = runLauncher({}, harness.deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.sockets[0].emit("close");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(probes, 2);
+  assert.deepEqual(sleeps, [100]);
+  harness.deps.signals.emit("SIGTERM");
+  assert.equal(await running, 0);
+});
+
+test("a pending observer start is closed when SIGTERM invalidates its generation", { timeout: 500 }, async () => {
+  let closed = 0;
+  const harness = createHarness({
+    sessionFactory: () => ({ close: () => { closed += 1; } }),
+    observerFactory: () => ({ start: async () => new Promise(() => {}), handleEvent: async () => {} }),
+  });
+  const running = runLauncher({}, harness.deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.deps.signals.emit("SIGTERM");
+
+  assert.equal(await running, 0);
+  assert.equal(closed, 1);
+});
+
+test("an observer start error closes its local CDP session", async () => {
+  let closed = 0;
+  const harness = createHarness({
+    sessionFactory: () => ({ close: () => { closed += 1; } }),
+    observerFactory: () => ({ start: async () => { throw new Error("fake network enable failure"); }, handleEvent: async () => {} }),
+  });
+
+  assert.equal(await runLauncher({}, harness.deps), 4);
+  assert.equal(closed, 1);
+});
+
+test("a successful reconnect reapplies the current usage snapshot", async () => {
+  let alive = true;
+  const harness = createHarness({ isCdpEndpointAlive: async () => alive });
+  const running = runLauncher({}, harness.deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  await harness.deps.observerFactory.lastHandlers.onUsagePayload(usage());
+  harness.sockets[0].emit("close");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(harness.calls.updates.length, 2);
+  alive = false;
+  harness.child.emit("exit");
+  assert.equal(await running, 0);
+});
