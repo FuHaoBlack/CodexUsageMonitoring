@@ -84,16 +84,24 @@ export async function connectGlobalWebSocket(url, { WebSocketImpl = globalThis.W
 function noOp() {}
 
 function withinDeadline(factory, timeoutMs, onLateValue = noOp, cancelled = null) {
-  let expired = false;
+  let callerEnded = false;
+  let lateHandled = false;
   let timer;
+  const markCallerEnded = () => { callerEnded = true; };
+  const handleLateValue = (value) => {
+    if (!callerEnded || lateHandled) return;
+    lateHandled = true;
+    try { onLateValue(value); } catch { /* 迟到资源清理不得产生未处理拒绝。 */ }
+  };
   const operation = Promise.resolve().then(factory);
-  operation.then((value) => { if (expired) onLateValue(value); }).catch(noOp);
+  operation.then(handleLateValue, noOp);
   const deadline = new Promise((_, reject) => {
     timer = setTimeout(() => {
-      expired = true;
+      markCallerEnded();
       reject(new Error("CDP 连接超时"));
     }, timeoutMs);
   });
+  cancelled?.catch(markCallerEnded).catch(noOp);
   return Promise.race(cancelled ? [operation, deadline, cancelled] : [operation, deadline]).finally(() => clearTimeout(timer));
 }
 

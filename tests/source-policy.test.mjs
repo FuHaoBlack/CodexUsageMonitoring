@@ -456,3 +456,31 @@ test("a successful reconnect reapplies the current usage snapshot", async () => 
   harness.child.emit("exit");
   assert.equal(await running, 0);
 });
+
+test("a cancelled pending WebSocket closes its late socket exactly once", { timeout: 500 }, async () => {
+  let resolveSocket;
+  let closes = 0;
+  let sessionFactoryCalls = 0;
+  const lateSocket = { close: () => { closes += 1; } };
+  const harness = createHarness({
+    connectWebSocket: async () => new Promise((resolve) => { resolveSocket = resolve; }),
+    sessionFactory: () => { sessionFactoryCalls += 1; return { close: () => {} }; },
+  });
+  const unhandled = [];
+  const capture = (reason) => unhandled.push(reason);
+  process.on("unhandledRejection", capture);
+  try {
+    const running = runLauncher({}, harness.deps);
+    await new Promise((resolve) => setImmediate(resolve));
+    harness.deps.signals.emit("SIGTERM");
+    assert.equal(await running, 0);
+    resolveSocket(lateSocket);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(closes, 1);
+    assert.equal(sessionFactoryCalls, 0);
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", capture);
+  }
+});
