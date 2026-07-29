@@ -22,11 +22,16 @@ test("parses one selected AppX package without guessing a version path", () => {
 });
 
 test("discovers Codex executable from selected AppX metadata", async () => {
+  let invocation;
   const installation = await discoverCodexInstallation({
-    execFile: async () => JSON.stringify({ InstallLocation: "C:\\Apps\\Codex", Version: "26.1.0.0" }),
+    execFile: async (...args) => { invocation = args; return JSON.stringify({ InstallLocation: "C:\\Apps\\Codex", Version: "26.1.0.0" }); },
     stat: async (path) => ({ isFile: () => path === "C:\\Apps\\Codex\\app\\Codex.exe" }),
   });
   assert.deepEqual(installation, { exePath: "C:\\Apps\\Codex\\app\\Codex.exe", version: "26.1.0.0" });
+  assert.equal(invocation[0], "C:\\Program Files\\PowerShell\\7\\pwsh.exe");
+  assert.deepEqual(invocation[1].slice(0, 4), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]);
+  assert.match(invocation[1].at(-1), /Get-AppxPackage -Name OpenAI\.Codex/);
+  assert.deepEqual(invocation[2], { windowsHide: true });
 });
 
 test("returns only Codex process identity without command lines", async () => {
@@ -42,6 +47,9 @@ test("returns only Codex process identity without command lines", async () => {
   assert.doesNotMatch(invocation[1].join(" "), /\\/);
   assert.match(invocation[1].at(-1), /Select-Object ProcessId, ExecutablePath/);
   assert.doesNotMatch(invocation[1].at(-1), /CommandLine/);
+  assert.equal(invocation[0], "C:\\Program Files\\PowerShell\\7\\pwsh.exe");
+  assert.deepEqual(invocation[1].slice(0, 4), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]);
+  assert.deepEqual(invocation[2], { windowsHide: true });
 });
 
 test("reserves a currently free TCP port on loopback and releases the socket", async () => {
@@ -109,6 +117,15 @@ test("enforces the total CDP deadline when fetch or JSON parsing never settles",
   }), /CDP 启动超时/);
 });
 
+test("clamps a long retry delay to the remaining CDP deadline", async () => {
+  const started = Date.now();
+  await assert.rejects(waitForCdpTarget(4567, {
+    timeoutMs: 15, retryMs: 60000,
+    fetch: async () => ({ ok: false }),
+  }), /CDP 启动超时/);
+  assert.ok(Date.now() - started < 200);
+});
+
 test("rejects malformed AppX discovery records and executable paths", async () => {
   for (const value of ["", "not json", "{}", JSON.stringify({ InstallLocation: "relative", Version: "26.1" }), JSON.stringify({ InstallLocation: "C:\\Apps", Version: "v26" })]) {
     assert.throws(() => parseAppxDiscoveryOutput(value), /安装信息/);
@@ -119,4 +136,10 @@ test("rejects malformed AppX discovery records and executable paths", async () =
 
 test("treats local CDP discovery failures as unavailable", async () => {
   assert.equal(await isCdpEndpointAlive(4567, { fetch: async () => { throw new Error("unavailable"); } }), false);
+});
+
+test("bounds CDP liveness checks when a fetch ignores abort", async () => {
+  const started = Date.now();
+  assert.equal(await isCdpEndpointAlive(4567, { timeoutMs: 15, fetch: async () => new Promise(() => {}) }), false);
+  assert.ok(Date.now() - started < 200);
 });

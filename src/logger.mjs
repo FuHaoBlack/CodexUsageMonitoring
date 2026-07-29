@@ -5,6 +5,20 @@ const ALLOWED_KEYS = new Set(["codexVersion", "event", "message", "mode", "mount
 const SENSITIVE = /(account|authorization|body|cookie|header|token|user|command|env|payload|bearer|\bsk-[A-Za-z0-9_-]{12,}\b)/i;
 const MAX_FATAL_LENGTH = 500;
 
+export const FATAL_MESSAGES = Object.freeze({
+  codexAlreadyRunning: "Codex 已在运行。请先正常关闭 Codex，再从“Codex（用量显示）”启动。",
+  codexNotInstalled: "没有找到已安装的 Codex。请先从 Microsoft Store 安装或修复 Codex。",
+  node24NotFound: "没有找到 Node.js 24。当前用量显示辅助程序无法启动。",
+  cdpConnectionFailed: "Codex 已启动，但用量显示未能连接到本地调试端口。你可以继续使用 Codex，或从原官方入口重新启动。",
+});
+const FATAL_MESSAGE_SET = new Set(Object.values(FATAL_MESSAGES));
+
+function isPlainObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 function validateMetadata(value, seen = new Set(), nested = false) {
   if (typeof value === "string" && SENSITIVE.test(value)) throw new Error("敏感日志内容被拒绝");
   if (Array.isArray(value)) return value.forEach((item) => validateMetadata(item, seen, true));
@@ -48,6 +62,7 @@ export async function createLogger(logDir, { maxBytes = 1024 * 1024, maxFiles = 
     info(event, metadata = {}) {
       if (!accepting) return Promise.reject(new Error("日志已关闭"));
       if (typeof event !== "string" || !/^[a-z]+(?:_[a-z0-9]+)*$/.test(event) || SENSITIVE.test(event)) return Promise.reject(new Error("日志事件不安全"));
+      if (!isPlainObject(metadata)) return Promise.reject(new Error("日志元数据必须是普通对象"));
       try {
       validateMetadata(metadata);
       const line = `${JSON.stringify({ timestamp: new Date().toISOString(), event, ...metadata })}\n`;
@@ -63,6 +78,7 @@ export async function createLogger(logDir, { maxBytes = 1024 * 1024, maxFiles = 
       if (typeof message !== "string" || message.length > MAX_FATAL_LENGTH || /[\r\n\x00-\x1f]/.test(message)) return Promise.reject(new Error("错误提示必须是单行文本"));
       if (!/\p{Script=Han}/u.test(message)) return Promise.reject(new Error("错误提示必须包含中文"));
       if (SENSITIVE.test(message)) return Promise.reject(new Error("错误提示包含敏感内容"));
+      if (!FATAL_MESSAGE_SET.has(message)) return Promise.reject(new Error("错误提示不是受控文案"));
       return enqueue(() => writeFile(path.join(logDir, "last-error.txt"), message, "utf8"));
     },
     close() { accepting = false; return queue; },

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createLogger } from "../src/logger.mjs";
+import { createLogger, FATAL_MESSAGES } from "../src/logger.mjs";
 
 async function withLogDir(run) {
   const dir = await mkdtemp(join(tmpdir(), "codex-usage-toolbar-log-"));
@@ -24,6 +24,14 @@ test("logs approved metadata and rejects sensitive keys recursively", async () =
 test("rejects metadata outside the approved whitelist", async () => withLogDir(async (dir) => {
   const logger = await createLogger(dir);
   await assert.rejects(logger.info("bad_event", { executablePath: "C:\\private" }), /不允许的日志字段/);
+  await logger.close();
+}));
+
+test("requires info metadata to be a plain object", async () => withLogDir(async (dir) => {
+  const logger = await createLogger(dir);
+  for (const metadata of [null, [], "text", new Date()]) {
+    await assert.rejects(logger.info("safe_event", metadata), /元数据/);
+  }
   await logger.close();
 }));
 
@@ -81,11 +89,12 @@ test("serializes concurrent writes and close waits for an already-started write"
 test("writeFatal contains only the Chinese user-facing message and cleanup remains usable", async () => withLogDir(async (dir) => {
   const logger = await createLogger(dir);
   await assert.rejects(logger.writeFatal("English failure"), /中文/);
+  await assert.rejects(logger.writeFatal("错误：raw English exception"), /受控/);
   await assert.rejects(logger.writeFatal("令牌 Bearer abc"), /敏感/);
   await assert.rejects(logger.writeFatal("无法连接 sk-abcdefghijklmnop"), /敏感/);
   await assert.rejects(logger.writeFatal("无法连接\nCodex"), /单行/);
-  await logger.writeFatal("无法连接 Codex，请检查是否已正常关闭。");
+  for (const message of Object.values(FATAL_MESSAGES)) await logger.writeFatal(message);
   await logger.close();
   await logger.close();
-  assert.equal(await readFile(join(dir, "last-error.txt"), "utf8"), "无法连接 Codex，请检查是否已正常关闭。");
+  assert.equal(await readFile(join(dir, "last-error.txt"), "utf8"), FATAL_MESSAGES.cdpConnectionFailed);
 }));

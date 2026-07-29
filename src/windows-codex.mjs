@@ -110,16 +110,21 @@ export async function waitForCdpTarget(port, { timeoutMs = 15000, retryMs = 250,
       if (error?.message === "CDP 启动超时") throw error;
       // CDP 尚未可用，继续等待启动窗口。
     }
-    if (Date.now() >= deadline) break;
-    await delay(retryMs);
+    const remaining = Math.max(0, deadline - Date.now());
+    if (remaining === 0) break;
+    await delay(Math.min(retryMs, remaining));
   }
   throw new Error("CDP 启动超时");
 }
 
-export async function isCdpEndpointAlive(port, { fetch: fetchImpl = globalThis.fetch } = {}) {
+export async function isCdpEndpointAlive(port, { timeoutMs = 1000, fetch: fetchImpl = globalThis.fetch } = {}) {
   validatePort(port);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("CDP 超时参数无效");
   try {
-    const response = await fetchImpl(`http://127.0.0.1:${port}/json/version`, { redirect: "error" });
+    const response = await beforeDeadline(
+      (signal) => fetchImpl(`http://127.0.0.1:${port}/json/version`, { signal, redirect: "error" }),
+      Date.now() + timeoutMs,
+    );
     return Boolean(response?.ok);
   } catch { return false; }
 }
