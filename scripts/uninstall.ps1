@@ -53,7 +53,14 @@ $launcherPath = Get-ExactChildPath (Get-ExactChildPath $installRoot 'src' '已�
 $startScriptPath = Get-ExactChildPath (Get-ExactChildPath $installRoot 'scripts' '已安装脚本目录') 'start.ps1' '已安装启动脚本'
 $allowedNames = @('node.exe', 'node', 'pwsh.exe', 'pwsh', 'powershell.exe', 'powershell')
 
-$helperProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+$allProcesses = $null
+try {
+    $allProcesses = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+} catch {
+    throw "无法枚举当前进程，已停止卸载：$($_.Exception.Message)"
+}
+
+$helperProcesses = @($allProcesses | Where-Object {
     $allowedNames -icontains $_.Name -and
     (Test-ExactHelperCommandLine $_.CommandLine $launcherPath $startScriptPath)
 })

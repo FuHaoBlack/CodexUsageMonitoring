@@ -19,7 +19,7 @@ try {
         throw 'Node.js 主版本低于 24。'
     }
 } catch {
-    Show-CodexUsageError '没有找到 Node.js 24 或版本不满足要求。当前用量显示辅助程序无法启动。'
+    Show-CodexUsageError '没有找到 Node.js 24。当前用量显示辅助程序无法启动。'
     exit 3
 }
 

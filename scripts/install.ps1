@@ -31,31 +31,37 @@ function Get-CodexIconPath {
         throw '未找到官方 Codex AppX 安装信息，无法创建带官方图标的快捷方式。'
     }
 
-    $icon = [IO.Path]::GetFullPath((Join-Path $package.InstallLocation 'Codex.exe'))
+    $icon = [IO.Path]::GetFullPath((Join-Path $package.InstallLocation 'app\Codex.exe'))
     if (-not (Test-Path -LiteralPath $icon -PathType Leaf)) {
-        throw '未找到官方 Codex.exe，无法创建带官方图标的快捷方式。'
+        throw '未找到官方 Codex AppX 的 app\Codex.exe，无法创建带官方图标的快捷方式。'
     }
     return $icon
 }
 
 $sourceRootPath = Normalize-Path $SourceRoot
-$sourceDirectories = @('src', 'scripts')
-foreach ($directory in $sourceDirectories) {
-    $sourceDirectory = Get-ExactChildPath $sourceRootPath $directory "源目录 $directory"
+$sourceSrcRoot = Get-ExactChildPath $sourceRootPath 'src' '源目录 src'
+$sourceScriptsRoot = Get-ExactChildPath $sourceRootPath 'scripts' '源目录 scripts'
+$sourceDirectories = @($sourceSrcRoot, $sourceScriptsRoot)
+foreach ($sourceDirectory in $sourceDirectories) {
     if (-not (Test-Path -LiteralPath $sourceDirectory -PathType Container)) {
-        throw "缺少必需源目录：$directory"
+        throw "缺少必需源目录：$sourceDirectory"
     }
 }
 
-$requiredSourceFiles = @(
-    'src\launcher.mjs',
-    'scripts\start.ps1'
-)
-foreach ($relativePath in $requiredSourceFiles) {
-    $sourceFile = [IO.Path]::GetFullPath((Join-Path $sourceRootPath $relativePath))
+$sourceLauncher = Get-ExactChildPath $sourceSrcRoot 'launcher.mjs' '源启动模块'
+$sourceStartScript = Get-ExactChildPath $sourceScriptsRoot 'start.ps1' '源启动脚本'
+foreach ($sourceFile in @($sourceLauncher, $sourceStartScript)) {
     if (-not (Test-Path -LiteralPath $sourceFile -PathType Leaf)) {
-        throw "缺少必需源文件：$relativePath"
+        throw "缺少必需源文件：$sourceFile"
     }
+}
+
+$sourceFiles = @()
+foreach ($sourceDirectory in $sourceDirectories) {
+    $sourceFiles += @(Get-ChildItem -LiteralPath $sourceDirectory -Recurse -File)
+}
+if ($sourceFiles.Count -eq 0) {
+    throw '没有可安装的源文件，已停止。'
 }
 
 $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
@@ -72,15 +78,6 @@ $startMenuRoot = Get-ExactChildPath $windowsRoot 'Start Menu' '开始菜单目�
 $programsRoot = Get-ExactChildPath $startMenuRoot 'Programs' '开始菜单 Programs 目录'
 $shortcutPath = Get-ExactChildPath $programsRoot 'Codex（用量显示）.lnk' '开始菜单快捷方式'
 
-$sourceFiles = Get-ChildItem -LiteralPath $sourceRootPath -Recurse -File |
-    Where-Object {
-        $_.FullName.StartsWith((Get-ExactChildPath $sourceRootPath 'src' '源目录 src'), [StringComparison]::OrdinalIgnoreCase) -or
-        $_.FullName.StartsWith((Get-ExactChildPath $sourceRootPath 'scripts' '源目录 scripts'), [StringComparison]::OrdinalIgnoreCase)
-    }
-if ($sourceFiles.Count -eq 0) {
-    throw '没有可安装的源文件，已停止。'
-}
-
 if ($WhatIfPreference) {
     [void]$PSCmdlet.ShouldProcess($temporaryRoot, '复制并验证临时安装目录')
     [void]$PSCmdlet.ShouldProcess($installRoot, '替换当前用户的 CodexUsageToolbar 安装目录')
@@ -89,17 +86,26 @@ if ($WhatIfPreference) {
 }
 
 $iconPath = Get-CodexIconPath
+$powerShellTarget = 'C:\Program Files\PowerShell\7\pwsh.exe'
+if (-not (Test-Path -LiteralPath $powerShellTarget -PathType Leaf)) {
+    throw '未找到固定的 PowerShell 7 启动程序，无法创建快捷方式。'
+}
+if (-not (Test-Path -LiteralPath $programsRoot -PathType Container)) {
+    throw '未找到当前用户开始菜单 Programs 目录，已停止安装。'
+}
+
 $stamp = Get-Date -Format 'yyyyMMddHHmmss'
 $backupRoot = $null
 $backupShortcutPath = $null
 $installedNewRoot = $false
-$shortcutAttempted = $false
+$shortcutCreateAttempted = $false
+$committed = $false
 
 try {
     if (-not $PSCmdlet.ShouldProcess($temporaryRoot, '复制并验证临时安装目录')) { return }
     New-Item -ItemType Directory -LiteralPath $temporaryRoot -Force | Out-Null
-    foreach ($directory in $sourceDirectories) {
-        Copy-Item -LiteralPath (Get-ExactChildPath $sourceRootPath $directory "源目录 $directory") -Destination $temporaryRoot -Recurse -Force
+    foreach ($sourceDirectory in $sourceDirectories) {
+        Copy-Item -LiteralPath $sourceDirectory -Destination $temporaryRoot -Recurse -Force
     }
     foreach ($sourceFile in $sourceFiles) {
         $relativePath = $sourceFile.FullName.Substring($sourceRootPath.Length).TrimStart('\', '/')
@@ -123,10 +129,6 @@ try {
     if (-not $PSCmdlet.ShouldProcess($shortcutPath, '创建 Codex（用量显示）开始菜单快捷方式')) {
         throw '已取消创建开始菜单快捷方式，已回滚本次安装。'
     }
-    $shortcutParent = [IO.Path]::GetDirectoryName($shortcutPath)
-    if (-not (Test-Path -LiteralPath $shortcutParent -PathType Container)) {
-        New-Item -ItemType Directory -LiteralPath $shortcutParent -Force | Out-Null
-    }
     if (Test-Path -LiteralPath $shortcutPath -PathType Leaf) {
         $backupShortcutPath = Get-ExactChildPath $programsRoot "Codex（用量显示）.lnk.backup-$stamp" '快捷方式备份'
         if (Test-Path -LiteralPath $backupShortcutPath) {
@@ -134,42 +136,77 @@ try {
         }
         Move-Item -LiteralPath $shortcutPath -Destination $backupShortcutPath -ErrorAction Stop
     }
-    $shortcutAttempted = $true
-    $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = 'C:\Program Files\PowerShell\7\pwsh.exe'
-    $installedScriptsRoot = Get-ExactChildPath $installRoot 'scripts' '已安装脚本目录'
-    $installedStartScript = Get-ExactChildPath $installedScriptsRoot 'start.ps1' '已安装启动脚本'
-    $shortcut.Arguments = '-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $installedStartScript + '"'
-    $shortcut.WorkingDirectory = $installRoot
-    $shortcut.IconLocation = "$iconPath,0"
-    $shortcut.Save()
 
-    if ($null -ne $backupRoot -and (Test-Path -LiteralPath $backupRoot)) {
-        Remove-Item -LiteralPath $backupRoot -Recurse -Force
+    $shellCom = $null
+    $shortcutCom = $null
+    $shortcutCreateAttempted = $true
+    try {
+        $shellCom = New-Object -ComObject WScript.Shell
+        $shortcutCom = $shellCom.CreateShortcut($shortcutPath)
+        $shortcutCom.TargetPath = $powerShellTarget
+        $installedScriptsRoot = Get-ExactChildPath $installRoot 'scripts' '已安装脚本目录'
+        $installedStartScript = Get-ExactChildPath $installedScriptsRoot 'start.ps1' '已安装启动脚本'
+        $shortcutCom.Arguments = '-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $installedStartScript + '"'
+        $shortcutCom.WorkingDirectory = $installRoot
+        $shortcutCom.IconLocation = "$iconPath,0"
+        $shortcutCom.Save()
+    } finally {
+        try {
+            if ($null -ne $shortcutCom) {
+                [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcutCom)
+            }
+        } finally {
+            try {
+                if ($null -ne $shellCom) {
+                    [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shellCom)
+                }
+            } finally {
+                [GC]::Collect()
+                [GC]::WaitForPendingFinalizers()
+                [GC]::Collect()
+            }
+        }
     }
-    if ($null -ne $backupShortcutPath -and (Test-Path -LiteralPath $backupShortcutPath)) {
-        Remove-Item -LiteralPath $backupShortcutPath -Force
-    }
-    Write-Host "安装完成：$installRoot"
-    Write-Host "开始菜单快捷方式：$shortcutPath"
+
+    $committed = $true
 } catch {
     $originalError = $_
-    if ($installedNewRoot -and (Test-Path -LiteralPath $installRoot)) {
-        Remove-Item -LiteralPath $installRoot -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    if ($null -ne $backupRoot -and (Test-Path -LiteralPath $backupRoot) -and -not (Test-Path -LiteralPath $installRoot)) {
-        Move-Item -LiteralPath $backupRoot -Destination $installRoot -ErrorAction SilentlyContinue
-    }
-    if ($shortcutAttempted -and (Test-Path -LiteralPath $shortcutPath -PathType Leaf)) {
-        Remove-Item -LiteralPath $shortcutPath -Force -ErrorAction SilentlyContinue
-    }
-    if ($null -ne $backupShortcutPath -and (Test-Path -LiteralPath $backupShortcutPath) -and -not (Test-Path -LiteralPath $shortcutPath)) {
-        Move-Item -LiteralPath $backupShortcutPath -Destination $shortcutPath -ErrorAction SilentlyContinue
+    if (-not $committed) {
+        if ($shortcutCreateAttempted -and (Test-Path -LiteralPath $shortcutPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $shortcutPath -Force -ErrorAction SilentlyContinue
+        }
+        if ($null -ne $backupShortcutPath -and (Test-Path -LiteralPath $backupShortcutPath) -and -not (Test-Path -LiteralPath $shortcutPath)) {
+            Move-Item -LiteralPath $backupShortcutPath -Destination $shortcutPath -ErrorAction SilentlyContinue
+        }
+        if ($installedNewRoot -and (Test-Path -LiteralPath $installRoot -PathType Container)) {
+            Remove-Item -LiteralPath $installRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if ($null -ne $backupRoot -and (Test-Path -LiteralPath $backupRoot) -and -not (Test-Path -LiteralPath $installRoot)) {
+            Move-Item -LiteralPath $backupRoot -Destination $installRoot -ErrorAction SilentlyContinue
+        }
     }
     throw $originalError
 } finally {
-    if (Test-Path -LiteralPath $temporaryRoot) {
+    if (Test-Path -LiteralPath $temporaryRoot -PathType Container) {
         Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
+}
+
+if ($committed) {
+    if ($null -ne $backupRoot -and (Test-Path -LiteralPath $backupRoot)) {
+        try {
+            Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction Stop
+        } catch {
+            Write-Warning "新安装已提交，保留本次精确安装备份：$backupRoot。原因：$($_.Exception.Message)"
+        }
+    }
+    if ($null -ne $backupShortcutPath -and (Test-Path -LiteralPath $backupShortcutPath)) {
+        try {
+            Remove-Item -LiteralPath $backupShortcutPath -Force -ErrorAction Stop
+        } catch {
+            Write-Warning "新安装已提交，保留本次精确快捷方式备份：$backupShortcutPath。原因：$($_.Exception.Message)"
+        }
+    }
+    Write-Host "安装完成：$installRoot"
+    Write-Host "开始菜单快捷方式：$shortcutPath"
 }
