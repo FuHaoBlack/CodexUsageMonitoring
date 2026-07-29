@@ -16,7 +16,9 @@ import {
 } from "./windows-codex.mjs";
 
 const STARTUP_TIMEOUT_MS = 15000;
-const HEALTH_TIMEOUT_MS = 2000;
+const HEALTH_WINDOW_MS = 2000;
+const RECOVERY_POLL_MS = 100;
+const CLEANUP_TIMEOUT_MS = 500;
 const NOT_MOUNTED = Object.freeze({ mounted: false, mode: null });
 
 function nodeMajorOf(value) {
@@ -24,16 +26,32 @@ function nodeMajorOf(value) {
   return Number.isInteger(major) ? major : 0;
 }
 
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function removeSocketListener(socket, event, listener) {
+  if (socket.removeEventListener) socket.removeEventListener(event, listener);
+  else if (socket.off) socket.off(event, listener);
+  else socket.removeListener?.(event, listener);
+}
+
 function promiseForSocketOpen(socket, timeoutMs) {
   return new Promise((resolve, reject) => {
     let settled = false;
+    let timer;
+    const cleanup = () => {
+      clearTimeout(timer);
+      removeSocketListener(socket, "open", opened);
+      removeSocketListener(socket, "error", failed);
+      removeSocketListener(socket, "close", failed);
+    };
     const settle = (callback, value) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      cleanup();
       callback(value);
     };
-    const timer = setTimeout(() => settle(reject, new Error("CDP WebSocket 连接超时")), timeoutMs);
     const opened = () => settle(resolve, socket);
     const failed = () => settle(reject, new Error("CDP WebSocket 连接失败"));
     if (socket.addEventListener) {
@@ -46,33 +64,31 @@ function promiseForSocketOpen(socket, timeoutMs) {
       socket.once("close", failed);
     } else {
       settle(reject, new Error("CDP WebSocket 不支持事件监听"));
+      return;
     }
+    timer = setTimeout(() => settle(reject, new Error("CDP WebSocket 连接超时")), timeoutMs);
   });
 }
 
-async function connectGlobalWebSocket(url, { WebSocketImpl = globalThis.WebSocket, timeoutMs = STARTUP_TIMEOUT_MS } = {}) {
+export async function connectGlobalWebSocket(url, { WebSocketImpl = globalThis.WebSocket, timeoutMs = STARTUP_TIMEOUT_MS } = {}) {
   if (typeof WebSocketImpl !== "function") throw new Error("Node.js WebSocket 不可用");
   const socket = new WebSocketImpl(url);
   try {
     return await promiseForSocketOpen(socket, timeoutMs);
   } catch (error) {
-    try { socket.close?.(); } catch { /* 辅助连接清理不能影响 Codex。 */ }
+    try { socket.close?.(); } catch { /* 仅清理辅助连接。 */ }
     throw error;
   }
 }
 
 function noOp() {}
 
-/**
- * Runs only the helper orchestration. All OS, process, and network boundaries
- * are injected so tests never operate a real Codex instance.
- */
 export async function runLauncher(options = {}, deps = {}) {
-  const runtime = {
-    ...deps,
-  };
+  const runtime = { now: Date.now, sleep, ...deps };
   const startupTimeoutMs = options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS;
-  const healthTimeoutMs = options.healthTimeoutMs ?? HEALTH_TIMEOUT_MS;
+  const healthWindowMs = options.healthWindowMs ?? HEALTH_WINDOW_MS;
+  const recoveryPollMs = options.recoveryPollMs ?? RECOVERY_POLL_MS;
+  const cleanupTimeoutMs = options.cleanupTimeoutMs ?? CLEANUP_TIMEOUT_MS;
   let logger;
   let child = null;
   let port = null;
@@ -81,11 +97,16 @@ export async function runLauncher(options = {}, deps = {}) {
   let observer = null;
   let currentSnapshot = null;
   let topFrameId = null;
+  let awaitingTopContext = false;
   let childExited = false;
-  let cdpAlive = true;
+  let childExitedAt = null;
+  let unavailableSince = null;
+  let cdpAlive = false;
   let finished = false;
   let reinstalling = false;
-  let recoveryQueue = Promise.resolve();
+  let nextGeneration = 0;
+  let activeGeneration = 0;
+  let supervisorPromise = null;
   let eventQueue = Promise.resolve();
   let finishPromise = null;
   let resolveCompletion;
@@ -93,58 +114,57 @@ export async function runLauncher(options = {}, deps = {}) {
   const registeredSignals = [];
 
   const safeInfo = async (event, metadata = {}) => {
-    try { await logger?.info?.(event, metadata); } catch { /* 日志不可用不得影响官方应用。 */ }
+    try { await logger?.info?.(event, metadata); } catch { /* 日志故障不得影响 Codex。 */ }
   };
+  const isActive = (generation) => !finished && generation === activeGeneration;
   const removeSignals = () => {
     for (const [signal, handler] of registeredSignals) runtime.signals?.off?.(signal, handler);
     registeredSignals.length = 0;
+  };
+  const boundedClear = async () => {
+    let timer;
+    const deadline = new Promise((resolve) => { timer = setTimeout(resolve, cleanupTimeoutMs); });
+    try {
+      await Promise.race([Promise.resolve().then(() => controller?.clear?.()), deadline]);
+    } catch {
+      // renderer 已离开或清理异常均不阻断会话关闭。
+    } finally {
+      clearTimeout(timer);
+    }
   };
   const finish = (exitCode) => {
     if (finishPromise) return finishPromise;
     finishPromise = (async () => {
       finished = true;
+      activeGeneration = ++nextGeneration;
       removeSignals();
-      try { await controller?.clear?.(); } catch { /* renderer 已离开时忽略。 */ }
+      await boundedClear();
       try { session?.close?.(); } catch { /* 仅关闭辅助 CDP 会话。 */ }
       await safeInfo("codex_session_ended");
-      try { await logger?.close?.(); } catch { /* 日志关闭不能改变返回码。 */ }
+      try { await logger?.close?.(); } catch { /* 保持既定退出码。 */ }
       resolveCompletion(exitCode);
       return exitCode;
     })();
     return finishPromise;
   };
   const fatal = async (exitCode, message) => {
-    try { await logger?.writeFatal?.(message); } catch { /* 仍返回受控状态码。 */ }
+    try { await logger?.writeFatal?.(message); } catch { /* 仍使用受控退出码。 */ }
     return finish(exitCode);
   };
-  const restoreRenderer = async () => {
-    if (reinstalling || finished || !controller) return;
+  const restoreRenderer = async (generation, clearFirst) => {
+    if (!isActive(generation) || reinstalling || !controller) return;
     reinstalling = true;
     try {
-      await controller.clear();
+      if (clearFirst) await controller.clear();
+      if (!isActive(generation)) return;
       await controller.install();
-      if (currentSnapshot) await controller.update(buildDisplayText(currentSnapshot));
+      if (currentSnapshot && isActive(generation)) await controller.update(buildDisplayText(currentSnapshot));
     } finally {
       reinstalling = false;
     }
   };
-  const dispatchEvent = (method, params) => {
-    eventQueue = eventQueue.then(async () => {
-      if (finished) return;
-      await observer?.handleEvent?.(method, params);
-      const topFrameNavigation = method === "Page.frameNavigated"
-        && params?.frame
-        && !Object.hasOwn(params.frame, "parentId");
-      if (topFrameNavigation) topFrameId = params.frame.id ?? null;
-      const defaultExecutionContext = method === "Runtime.executionContextCreated"
-        && params?.context?.auxData?.isDefault === true
-        && topFrameId !== null
-        && params.context.auxData.frameId === topFrameId;
-      if (topFrameNavigation || defaultExecutionContext) await restoreRenderer();
-    }).catch(noOp);
-    return eventQueue;
-  };
-  const handleUsagePayload = async (payload) => {
+  const handleUsagePayload = async (generation, payload) => {
+    if (!isActive(generation)) return;
     const next = parseUsagePayload(payload);
     if (!next) {
       currentSnapshot = null;
@@ -152,70 +172,135 @@ export async function runLauncher(options = {}, deps = {}) {
       await safeInfo("usage_payload_missing_weekly_window");
       return;
     }
-    const accountChanged = Boolean(
-      currentSnapshot?.accountKey
-      && next.accountKey
-      && currentSnapshot.accountKey !== next.accountKey,
-    );
+    const accountChanged = Boolean(currentSnapshot?.accountKey && next.accountKey && currentSnapshot.accountKey !== next.accountKey);
     if (accountChanged) await controller?.clear?.();
+    if (!isActive(generation)) return;
     currentSnapshot = mergeObservedUsage(currentSnapshot, { type: "usage", value: next });
     const status = await controller?.update?.(buildDisplayText(currentSnapshot)) ?? NOT_MOUNTED;
     await safeInfo("usage_response_observed");
     if (status.mounted) await safeInfo("toolbar_injection_verified", { mounted: true, mode: status.mode ?? null });
   };
-  const handleResetCreditsPayload = async (payload) => {
-    const expiry = parseResetCreditsPayload(payload, Date.now());
-    currentSnapshot = mergeObservedUsage(currentSnapshot, { type: "expiry", value: expiry });
+  const handleResetCreditsPayload = async (generation, payload) => {
+    if (!isActive(generation)) return;
+    currentSnapshot = mergeObservedUsage(currentSnapshot, { type: "expiry", value: parseResetCreditsPayload(payload, Date.now()) });
     if (currentSnapshot) {
       const status = await controller?.update?.(buildDisplayText(currentSnapshot)) ?? NOT_MOUNTED;
       if (status.mounted) await safeInfo("toolbar_injection_verified", { mounted: true, mode: status.mode ?? null });
     }
     await safeInfo("reset_credits_response_observed");
   };
-  const establishConnection = async () => {
-    const target = await runtime.waitForCdpTarget(port, { timeoutMs: startupTimeoutMs });
-    const socket = await runtime.connectWebSocket(target.webSocketDebuggerUrl, { timeoutMs: startupTimeoutMs });
-    cdpAlive = true;
-    session = runtime.sessionFactory(socket, {
-      onEvent: dispatchEvent,
-      onClose: () => {
-        cdpAlive = false;
-        scheduleRecovery();
-      },
-    });
-    observer = runtime.observerFactory(session, {
-      onUsagePayload: handleUsagePayload,
-      onResetCreditsPayload: handleResetCreditsPayload,
-      onError: noOp,
-    });
-    await observer.start();
-    controller = runtime.injectionFactory(session, options.injectSource ?? "", { info: (event) => safeInfo(event) });
-    const status = await controller.install();
-    await safeInfo("cdp_connected");
-    if (status?.mounted) await safeInfo("toolbar_injection_verified", { mounted: true, mode: status.mode ?? null });
-  };
-  const scheduleRecovery = () => {
-    recoveryQueue = recoveryQueue.then(async () => {
-      if (finished || port === null) return;
-      const alive = await runtime.isCdpEndpointAlive(port, { timeoutMs: healthTimeoutMs });
-      if (alive && !childExited && !cdpAlive) {
-        try {
-          await establishConnection();
-          await safeInfo("renderer_reconnected");
-        } catch {
-          // 官方应用仍在运行，不能为辅助连接错误退出或干预它。
-        }
-      } else if (childExited && !alive) {
-        await finish(0);
+  const dispatchEvent = (generation, localObserver, method, params) => {
+    eventQueue = eventQueue.then(async () => {
+      if (!isActive(generation)) return;
+      await localObserver?.handleEvent?.(method, params);
+      if (!isActive(generation)) return;
+      const topNavigation = method === "Page.frameNavigated" && params?.frame && !Object.hasOwn(params.frame, "parentId");
+      if (topNavigation) {
+        topFrameId = params.frame.id ?? null;
+        awaitingTopContext = true;
+        await controller?.clear?.();
+        return;
+      }
+      const frameId = params?.context?.auxData?.frameId;
+      const isDefaultContext = method === "Runtime.executionContextCreated" && params?.context?.auxData?.isDefault === true;
+      const topContext = isDefaultContext && (topFrameId === null || frameId === topFrameId);
+      if (topContext) {
+        const clearFirst = !awaitingTopContext;
+        awaitingTopContext = false;
+        await restoreRenderer(generation, clearFirst);
       }
     }).catch(noOp);
-    return recoveryQueue;
+    return eventQueue;
   };
-  const bindChildExit = () => {
-    child?.once?.("exit", () => {
-      childExited = true;
-      scheduleRecovery();
+
+  async function establishConnection() {
+    const generation = ++nextGeneration;
+    activeGeneration = generation;
+    const target = await runtime.waitForCdpTarget(port, { timeoutMs: startupTimeoutMs });
+    if (!isActive(generation)) return false;
+    const socket = await runtime.connectWebSocket(target.webSocketDebuggerUrl, { timeoutMs: startupTimeoutMs });
+    if (!isActive(generation)) {
+      try { socket.close?.(); } catch { /* 仅关闭过期辅助连接。 */ }
+      return false;
+    }
+    let localObserver = null;
+    const localSession = runtime.sessionFactory(socket, {
+      onEvent: (method, params) => dispatchEvent(generation, localObserver, method, params),
+      onClose: () => {
+        if (!isActive(generation)) return;
+        cdpAlive = false;
+        scheduleSupervisor();
+      },
     });
+    if (!isActive(generation)) {
+      try { localSession?.close?.(); } catch { /* 过期连接无害关闭。 */ }
+      return false;
+    }
+    localObserver = runtime.observerFactory(localSession, {
+      onUsagePayload: (payload) => handleUsagePayload(generation, payload),
+      onResetCreditsPayload: (payload) => handleResetCreditsPayload(generation, payload),
+      onError: noOp,
+    });
+    await localObserver.start();
+    if (!isActive(generation)) return false;
+    const localController = runtime.injectionFactory(localSession, options.injectSource ?? "", { info: (event) => safeInfo(event) });
+    session = localSession;
+    observer = localObserver;
+    controller = localController;
+    const status = await localController.install();
+    if (!isActive(generation)) return false;
+    cdpAlive = true;
+    unavailableSince = null;
+    await safeInfo("cdp_connected");
+    if (status?.mounted) await safeInfo("toolbar_injection_verified", { mounted: true, mode: status.mode ?? null });
+    return true;
+  }
+
+  function scheduleSupervisor() {
+    if (supervisorPromise || finished || port === null || (!childExited && cdpAlive)) return;
+    supervisorPromise = (async () => {
+      while (!finished && (childExited || !cdpAlive)) {
+        const observedAt = runtime.now();
+        const baseline = childExited && unavailableSince !== null ? Math.max(childExitedAt, unavailableSince) : null;
+        const remaining = baseline === null ? recoveryPollMs : Math.max(0, healthWindowMs - (observedAt - baseline));
+        const cap = Math.min(recoveryPollMs, remaining || recoveryPollMs);
+        const timeoutMs = Math.max(1, cap - 1);
+        const alive = await runtime.isCdpEndpointAlive(port, { timeoutMs });
+        if (finished) break;
+        const checkedAt = runtime.now();
+        if (alive) {
+          unavailableSince = null;
+          if (!childExited && !cdpAlive) {
+            try {
+              if (await establishConnection()) await safeInfo("renderer_reconnected");
+            } catch {
+              cdpAlive = false;
+            }
+          }
+        } else {
+          if (unavailableSince === null) unavailableSince = checkedAt;
+          const unavailableBaseline = Math.max(childExitedAt ?? unavailableSince, unavailableSince);
+          if (childExited && checkedAt - unavailableBaseline >= healthWindowMs) {
+            await finish(0);
+            break;
+          }
+        }
+        if (!finished && (childExited || !cdpAlive)) await runtime.sleep(recoveryPollMs);
+      }
+    })().catch(noOp).finally(() => {
+      supervisorPromise = null;
+      if (!finished && (childExited || !cdpAlive)) scheduleSupervisor();
+    });
+  }
+
+  const bindChild = () => {
+    child?.once?.("exit", () => {
+      if (finished || childExited) return;
+      childExited = true;
+      childExitedAt = runtime.now();
+      scheduleSupervisor();
+    });
+    child?.once?.("error", () => { finish(5); });
   };
   const bindSignals = () => {
     for (const signal of ["SIGINT", "SIGTERM"]) {
@@ -230,23 +315,21 @@ export async function runLauncher(options = {}, deps = {}) {
     await safeInfo("launcher_started");
     if (nodeMajorOf(runtime.nodeMajor) < 24) return fatal(3, FATAL_MESSAGES.node24NotFound);
     let installation;
-    try {
-      installation = await runtime.discoverCodexInstallation();
-    } catch {
-      return fatal(3, FATAL_MESSAGES.codexNotInstalled);
-    }
+    try { installation = await runtime.discoverCodexInstallation(); } catch { return fatal(3, FATAL_MESSAGES.codexNotInstalled); }
     const existing = await runtime.findRunningCodexMainProcesses();
     if (existing.length > 0) return fatal(2, FATAL_MESSAGES.codexAlreadyRunning);
     port = await runtime.reserveLoopbackPort();
     child = runtime.launchCodex(installation.exePath, port);
     await safeInfo("codex_launched");
-    try {
-      await establishConnection();
-    } catch {
-      return fatal(4, FATAL_MESSAGES.cdpConnectionFailed);
-    }
-    bindChildExit();
+    bindChild();
     bindSignals();
+    const startup = establishConnection();
+    const startupResult = await Promise.race([
+      startup.then((connected) => ({ connected })).catch(() => ({ connected: false })),
+      completion.then((exitCode) => ({ exitCode })),
+    ]);
+    if (Object.hasOwn(startupResult, "exitCode")) return startupResult.exitCode;
+    if (!startupResult.connected) return fatal(4, FATAL_MESSAGES.cdpConnectionFailed);
     return completion;
   } catch {
     return finish(5);

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
-import { runLauncher } from "../src/launcher.mjs";
+import { connectGlobalWebSocket, runLauncher } from "../src/launcher.mjs";
 
 const files = [
   "../src/launcher.mjs",
@@ -44,6 +44,7 @@ function usage(accountKey = "account-a", usedPercent = 34) {
 }
 
 function createHarness(overrides = {}) {
+  let clock = 0;
   const child = new EventEmitter();
   const sockets = [];
   const logs = [];
@@ -92,6 +93,8 @@ function createHarness(overrides = {}) {
       return controller;
     },
     signals: new EventEmitter(),
+    now: () => clock,
+    sleep: async (milliseconds) => { clock += milliseconds; },
     ...overrides,
   };
   return { child, sockets, logs, calls, sessions, controllers, deps };
@@ -119,7 +122,7 @@ test("a CDP startup timeout leaves the launched child untouched", async () => {
   assert.equal(await runLauncher({}, harness.deps), 4);
   assert.equal(harness.calls.launch, 1);
   assert.equal(touched, false);
-  assert.equal(harness.child.listenerCount("exit"), 0);
+  assert.equal(harness.child.listenerCount("exit"), 1);
 });
 
 test("invalid usage clears the injected toolbar instead of retaining stale text", async () => {
@@ -199,8 +202,8 @@ test("top-frame recovery reinstalls once and ignores a child-frame execution con
   harness.child.emit("exit");
 
   assert.equal(await running, 0);
-  assert.equal(installsAfterTopNavigation, 2);
-  assert.equal(harness.calls.installs, 2);
+  assert.equal(installsAfterTopNavigation, 1);
+  assert.equal(harness.calls.installs, 1);
 });
 
 test("a termination signal cleans helper resources without killing Codex", async () => {
@@ -212,4 +215,157 @@ test("a termination signal cleans helper resources without killing Codex", async
 
   assert.equal(await running, 0);
   assert.equal(harness.calls.closed, 1);
+});
+
+test("a child that briefly retains CDP completes only after its endpoint stays unavailable", { timeout: 500 }, async () => {
+  let now = 0;
+  const alive = [true, false, false, false];
+  const harness = createHarness({
+    now: () => now,
+    sleep: async (milliseconds) => { now += milliseconds; },
+    isCdpEndpointAlive: async () => alive.shift() ?? false,
+  });
+  const running = runLauncher({ healthWindowMs: 200, recoveryPollMs: 100 }, harness.deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.child.emit("exit");
+
+  assert.equal(await running, 0);
+  assert.ok(now >= 200);
+});
+
+test("a renderer socket that is initially down reconnects when local CDP comes back", { timeout: 500 }, async () => {
+  let now = 0;
+  const alive = [false, true, false, false, false];
+  const harness = createHarness({
+    now: () => now,
+    sleep: async (milliseconds) => { now += milliseconds; },
+    isCdpEndpointAlive: async () => alive.shift() ?? false,
+  });
+  const running = runLauncher({ healthWindowMs: 200, recoveryPollMs: 100 }, harness.deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.sockets[0].emit("close");
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(harness.sockets.length, 2);
+  harness.child.emit("exit");
+  assert.equal(await running, 0);
+});
+
+test("a hung renderer clear cannot block SIGTERM cleanup", { timeout: 500 }, async () => {
+  const harness = createHarness({
+    injectionFactory: () => ({
+      install: async () => ({ mounted: true, mode: "full" }),
+      clear: async () => new Promise(() => {}),
+      update: async () => ({ mounted: true, mode: "full" }),
+    }),
+  });
+  const running = runLauncher({ cleanupTimeoutMs: 10 }, harness.deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.deps.signals.emit("SIGTERM");
+
+  assert.equal(await running, 0);
+});
+
+test("a startup signal settles without waiting for a pending CDP target", { timeout: 500 }, async () => {
+  const harness = createHarness({ waitForCdpTarget: async () => new Promise(() => {}) });
+  const running = runLauncher({}, harness.deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.deps.signals.emit("SIGINT");
+
+  assert.equal(await running, 0);
+});
+
+test("a child startup error returns the internal helper code", { timeout: 500 }, async () => {
+  const harness = createHarness({ waitForCdpTarget: async () => new Promise(() => {}) });
+  const running = runLauncher({}, harness.deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.child.emit("error", new Error("fake child error"));
+
+  assert.equal(await running, 5);
+});
+
+test("a WebSocket open removes every temporary listener", async () => {
+  class FakeWebSocket extends EventEmitter {
+    static last = null;
+    constructor() { super(); FakeWebSocket.last = this; }
+    close() {}
+  }
+  const opening = connectGlobalWebSocket("ws://127.0.0.1:4567/page", { WebSocketImpl: FakeWebSocket, timeoutMs: 100 });
+  const socket = FakeWebSocket.last;
+  socket.emit("open");
+  await opening;
+
+  assert.equal(socket.listenerCount("open"), 0);
+  assert.equal(socket.listenerCount("error"), 0);
+  assert.equal(socket.listenerCount("close"), 0);
+});
+
+test("a WebSocket failure removes every temporary listener", async () => {
+  class FakeWebSocket extends EventEmitter {
+    static last = null;
+    constructor() { super(); FakeWebSocket.last = this; }
+    close() {}
+  }
+  const opening = connectGlobalWebSocket("ws://127.0.0.1:4567/page", { WebSocketImpl: FakeWebSocket, timeoutMs: 100 });
+  const socket = FakeWebSocket.last;
+  socket.emit("error", new Error("fake socket error"));
+  await assert.rejects(opening, /WebSocket/);
+
+  assert.equal(socket.listenerCount("open"), 0);
+  assert.equal(socket.listenerCount("error"), 0);
+  assert.equal(socket.listenerCount("close"), 0);
+});
+
+test("an old session close or event cannot disturb the reconnected generation", async () => {
+  let now = 0;
+  const alive = [true, false, false, false];
+  const harness = createHarness({
+    now: () => now,
+    sleep: async (milliseconds) => { now += milliseconds; },
+    isCdpEndpointAlive: async () => alive.shift() ?? false,
+  });
+  const running = runLauncher({ healthWindowMs: 200, recoveryPollMs: 100 }, harness.deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.sockets[0].emit("close");
+  await new Promise((resolve) => setImmediate(resolve));
+  const clearsAfterReconnect = harness.calls.clear;
+  await harness.sessions[0].emitEvent("Page.frameNavigated", { frame: { id: "stale" } });
+  harness.sockets[0].emit("close");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(harness.calls.clear, clearsAfterReconnect);
+  harness.child.emit("exit");
+  assert.equal(await running, 0);
+});
+
+test("a top-frame navigation clears once and its default context installs once", async () => {
+  const harness = createHarness();
+  const running = runLauncher({}, harness.deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  await harness.sessions[0].emitEvent("Page.frameNavigated", { frame: { id: "top" } });
+  await harness.sessions[0].emitEvent("Runtime.executionContextCreated", {
+    context: { auxData: { isDefault: true, frameId: "top" } },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.child.emit("exit");
+
+  assert.equal(await running, 0);
+  assert.equal(harness.calls.clear, 2);
+  assert.equal(harness.calls.installs, 2);
+});
+
+test("an independent default top context clears and reinstalls the renderer", async () => {
+  const harness = createHarness();
+  const running = runLauncher({}, harness.deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  await harness.sessions[0].emitEvent("Runtime.executionContextCreated", {
+    context: { auxData: { isDefault: true, frameId: "initial-top" } },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.child.emit("exit");
+
+  assert.equal(await running, 0);
+  assert.equal(harness.calls.clear, 2);
+  assert.equal(harness.calls.installs, 2);
 });
