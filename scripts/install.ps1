@@ -103,7 +103,7 @@ $committed = $false
 
 try {
     if (-not $PSCmdlet.ShouldProcess($temporaryRoot, '复制并验证临时安装目录')) { return }
-    New-Item -ItemType Directory -LiteralPath $temporaryRoot -Force | Out-Null
+    [IO.Directory]::CreateDirectory($temporaryRoot) | Out-Null
     foreach ($sourceDirectory in $sourceDirectories) {
         Copy-Item -LiteralPath $sourceDirectory -Destination $temporaryRoot -Recurse -Force
     }
