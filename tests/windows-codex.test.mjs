@@ -15,41 +15,78 @@ test("parses one selected AppX package without guessing a version path", () => {
   assert.deepEqual(parseAppxDiscoveryOutput(JSON.stringify({
     InstallLocation: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.721.4979.0_x64__2p2nqsd0c76g0",
     Version: "26.721.4979.0",
+    Applications: [
+      { Executable: "app/ChatGPT.exe", EntryPoint: "Windows.FullTrustApplication" },
+    ],
   })), {
     installLocation: "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.721.4979.0_x64__2p2nqsd0c76g0",
     version: "26.721.4979.0",
+    executable: "app\\ChatGPT.exe",
   });
 });
 
-test("discovers Codex executable from selected AppX metadata", async () => {
+test("discovers the unique FullTrust manifest executable instead of guessing Codex.exe", async () => {
   let invocation;
+  const checkedPaths = [];
   const installation = await discoverCodexInstallation({
-    execFile: async (...args) => { invocation = args; return JSON.stringify({ InstallLocation: "C:\\Apps\\Codex", Version: "26.1.0.0" }); },
-    stat: async (path) => ({ isFile: () => path === "C:\\Apps\\Codex\\app\\Codex.exe" }),
+    execFile: async (...args) => {
+      invocation = args;
+      return JSON.stringify({
+        InstallLocation: "C:\\Apps\\Codex",
+        Version: "26.1.0.0",
+        Applications: [
+          { Executable: "app/ChatGPT.exe", EntryPoint: "Windows.FullTrustApplication" },
+        ],
+      });
+    },
+    stat: async (candidate) => {
+      checkedPaths.push(candidate);
+      return { isFile: () => candidate === "C:\\Apps\\Codex\\app\\ChatGPT.exe" };
+    },
   });
-  assert.deepEqual(installation, { exePath: "C:\\Apps\\Codex\\app\\Codex.exe", version: "26.1.0.0" });
+  assert.deepEqual(installation, {
+    exePath: "C:\\Apps\\Codex\\app\\ChatGPT.exe",
+    installLocation: "C:\\Apps\\Codex",
+    version: "26.1.0.0",
+  });
+  assert.deepEqual(checkedPaths, ["C:\\Apps\\Codex\\app\\ChatGPT.exe"]);
   assert.equal(invocation[0], "C:\\Program Files\\PowerShell\\7\\pwsh.exe");
   assert.deepEqual(invocation[1].slice(0, 4), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]);
   assert.match(invocation[1].at(-1), /Get-AppxPackage -Name OpenAI\.Codex/);
+  assert.match(invocation[1].at(-1), /Get-AppxPackageManifest/);
   assert.deepEqual(invocation[2], { windowsHide: true });
 });
 
-test("returns only Codex process identity without command lines", async () => {
+test("returns only the exact manifest executable process using Windows path semantics", async () => {
   let invocation;
-  const result = await findRunningCodexMainProcesses({
+  const result = await findRunningCodexMainProcesses("C:\\Apps\\Codex\\app\\ChatGPT.exe", {
     execFile: async (...args) => {
       invocation = args;
-      return JSON.stringify([{ ProcessId: 42, ExecutablePath: "C:\\Apps\\Codex\\app\\Codex.exe" }]);
+      return JSON.stringify([
+        { ProcessId: 42, ExecutablePath: "c:\\apps\\CODEX\\app\\chatgpt.exe" },
+        { ProcessId: 43, ExecutablePath: "C:\\Apps\\Codex\\app\\resources\\codex.exe" },
+        { ProcessId: 44, ExecutablePath: "C:\\Users\\user\\AppData\\Local\\OpenAI\\Codex\\bin\\codex.exe" },
+        { ProcessId: 45, ExecutablePath: "D:\\Other\\ChatGPT.exe" },
+        { ProcessId: 46, ExecutablePath: null },
+        { ProcessId: 47, ExecutablePath: "app\\ChatGPT.exe" },
+      ]);
     },
   });
-  assert.deepEqual(result, [{ pid: 42, executablePath: "C:\\Apps\\Codex\\app\\Codex.exe" }]);
-  assert.match(invocation[1].join(" "), /-Filter "Name='Codex\.exe'"/);
-  assert.doesNotMatch(invocation[1].join(" "), /\\/);
+  assert.deepEqual(result, [{ pid: 42, executablePath: "c:\\apps\\CODEX\\app\\chatgpt.exe" }]);
   assert.match(invocation[1].at(-1), /Select-Object ProcessId, ExecutablePath/);
   assert.doesNotMatch(invocation[1].at(-1), /CommandLine/);
   assert.equal(invocation[0], "C:\\Program Files\\PowerShell\\7\\pwsh.exe");
   assert.deepEqual(invocation[1].slice(0, 4), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]);
   assert.deepEqual(invocation[2], { windowsHide: true });
+});
+
+test("fails closed when process enumeration cannot determine whether Codex is running", async () => {
+  await assert.rejects(
+    findRunningCodexMainProcesses("C:\\Apps\\Codex\\app\\ChatGPT.exe", {
+      execFile: async () => { throw new Error("access denied"); },
+    }),
+    /access denied/,
+  );
 });
 
 test("reserves a currently free TCP port on loopback and releases the socket", async () => {
@@ -130,8 +167,40 @@ test("rejects malformed AppX discovery records and executable paths", async () =
   for (const value of ["", "not json", "{}", JSON.stringify({ InstallLocation: "relative", Version: "26.1" }), JSON.stringify({ InstallLocation: "C:\\Apps", Version: "v26" })]) {
     assert.throws(() => parseAppxDiscoveryOutput(value), /安装信息/);
   }
-  await assert.rejects(discoverCodexInstallation({ execFile: async () => JSON.stringify({ InstallLocation: "C:\\Apps", Version: "26.1.0.0" }), stat: async () => { throw new Error("missing"); } }), /可执行文件/);
-  await assert.rejects(discoverCodexInstallation({ execFile: async () => JSON.stringify({ InstallLocation: "C:\\Apps", Version: "26.1.0.0" }), stat: async () => ({ isFile: () => false }) }), /可执行文件/);
+  const validBase = {
+    InstallLocation: "C:\\Apps\\Codex",
+    Version: "26.1.0.0",
+    Applications: [{ Executable: "app/ChatGPT.exe", EntryPoint: "Windows.FullTrustApplication" }],
+  };
+  await assert.rejects(discoverCodexInstallation({ execFile: async () => JSON.stringify(validBase), stat: async () => { throw new Error("missing"); } }), /可执行文件/);
+  await assert.rejects(discoverCodexInstallation({ execFile: async () => JSON.stringify(validBase), stat: async () => ({ isFile: () => false }) }), /可执行文件/);
+});
+
+test("rejects unsafe, missing, non-FullTrust, and ambiguous manifest executables", () => {
+  const record = (Applications) => JSON.stringify({
+    InstallLocation: "C:\\Apps\\Codex",
+    Version: "26.1.0.0",
+    Applications,
+  });
+  const invalidApplications = [
+    [],
+    [{ EntryPoint: "Windows.FullTrustApplication" }],
+    [{ Executable: "", EntryPoint: "Windows.FullTrustApplication" }],
+    [{ Executable: "C:\\evil.exe", EntryPoint: "Windows.FullTrustApplication" }],
+    [{ Executable: "\\\\server\\share\\evil.exe", EntryPoint: "Windows.FullTrustApplication" }],
+    [{ Executable: "..\\evil.exe", EntryPoint: "Windows.FullTrustApplication" }],
+    [{ Executable: "app\\..\\..\\evil.exe", EntryPoint: "Windows.FullTrustApplication" }],
+    [{ Executable: ".\\app\\ChatGPT.exe", EntryPoint: "Windows.FullTrustApplication" }],
+    [{ Executable: "app\\ChatGPT.exe\u0000", EntryPoint: "Windows.FullTrustApplication" }],
+    [{ Executable: "app\\ChatGPT.exe", EntryPoint: "OpenAI.OtherApplication" }],
+    [
+      { Executable: "app\\ChatGPT.exe", EntryPoint: "Windows.FullTrustApplication" },
+      { Executable: "app\\Other.exe", EntryPoint: "Windows.FullTrustApplication" },
+    ],
+  ];
+  for (const applications of invalidApplications) {
+    assert.throws(() => parseAppxDiscoveryOutput(record(applications)), /安装信息/);
+  }
 });
 
 test("treats local CDP discovery failures as unavailable", async () => {

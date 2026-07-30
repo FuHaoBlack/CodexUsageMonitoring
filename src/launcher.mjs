@@ -301,7 +301,7 @@ export async function runLauncher(options = {}, deps = {}) {
       cdpAlive = true;
       unavailableSince = null;
       if (currentSnapshot) await localController.update(buildDisplayText(currentSnapshot));
-      await safeInfo("cdp_connected");
+      await safeInfo("cdp_connected", { port });
       if (status?.mounted) await safeInfo("toolbar_injection_verified", { mounted: true, mode: status.mode ?? null });
       return true;
     } catch (error) {
@@ -395,7 +395,7 @@ export async function runLauncher(options = {}, deps = {}) {
     if (nodeMajorOf(runtime.nodeMajor) < 24) return fatal(3, FATAL_MESSAGES.node24NotFound);
     let installation;
     try { installation = await runtime.discoverCodexInstallation(); } catch { return fatal(3, FATAL_MESSAGES.codexNotInstalled); }
-    const existing = await runtime.findRunningCodexMainProcesses();
+    const existing = await runtime.findRunningCodexMainProcesses(installation.exePath);
     if (existing.length > 0) return fatal(2, FATAL_MESSAGES.codexAlreadyRunning);
     port = await runtime.reserveLoopbackPort();
     child = runtime.launchCodex(installation.exePath, port);

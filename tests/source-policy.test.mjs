@@ -48,7 +48,7 @@ function createHarness(overrides = {}) {
   const child = new EventEmitter();
   const sockets = [];
   const logs = [];
-  const calls = { reserve: 0, launch: 0, clear: 0, updates: [], installs: 0 };
+  const calls = { reserve: 0, launch: 0, launchPaths: [], findPaths: [], clear: 0, updates: [], installs: 0 };
   const sessions = [];
   const controllers = [];
   const deps = {
@@ -58,10 +58,21 @@ function createHarness(overrides = {}) {
       writeFatal: async (message) => { logs.push({ fatal: message }); },
       close: async () => { calls.closed = (calls.closed ?? 0) + 1; },
     }),
-    discoverCodexInstallation: async () => ({ exePath: "C:\\Codex.exe" }),
-    findRunningCodexMainProcesses: async () => [],
+    discoverCodexInstallation: async () => ({
+      exePath: "C:\\Apps\\Codex\\app\\ChatGPT.exe",
+      installLocation: "C:\\Apps\\Codex",
+      version: "26.1.0.0",
+    }),
+    findRunningCodexMainProcesses: async (expectedExePath) => {
+      calls.findPaths.push(expectedExePath);
+      return [];
+    },
     reserveLoopbackPort: async () => { calls.reserve += 1; return 4567; },
-    launchCodex: () => { calls.launch += 1; return child; },
+    launchCodex: (exePath) => {
+      calls.launch += 1;
+      calls.launchPaths.push(exePath);
+      return child;
+    },
     waitForCdpTarget: async () => ({ webSocketDebuggerUrl: "ws://127.0.0.1:4567/page" }),
     isCdpEndpointAlive: async () => false,
     connectWebSocket: async () => {
@@ -111,6 +122,21 @@ test("an existing Codex main process prevents port reservation and launch", asyn
     { fatal: "Codex 已在运行。请先正常关闭 Codex，再从“Codex（用量显示）”启动。" },
     { event: "codex_session_ended", metadata: {} },
   ]);
+});
+
+test("uses the manifest executable as the shared process identity and records the CDP port", async () => {
+  const harness = createHarness();
+  const running = runLauncher({}, harness.deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.child.emit("exit");
+
+  assert.equal(await running, 0);
+  assert.deepEqual(harness.calls.findPaths, ["C:\\Apps\\Codex\\app\\ChatGPT.exe"]);
+  assert.deepEqual(harness.calls.launchPaths, ["C:\\Apps\\Codex\\app\\ChatGPT.exe"]);
+  assert.deepEqual(
+    harness.logs.find((entry) => entry.event === "cdp_connected"),
+    { event: "cdp_connected", metadata: { port: 4567 } },
+  );
 });
 
 test("a CDP startup timeout leaves the launched child untouched", async () => {
