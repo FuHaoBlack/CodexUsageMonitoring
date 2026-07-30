@@ -73,6 +73,7 @@ test("returns only the exact manifest executable process using Windows path sema
     },
   });
   assert.deepEqual(result, [{ pid: 42, executablePath: "c:\\apps\\CODEX\\app\\chatgpt.exe" }]);
+  assert.match(invocation[1].at(-1), /Get-CimInstance Win32_Process -ErrorAction Stop/);
   assert.match(invocation[1].at(-1), /Select-Object ProcessId, ExecutablePath/);
   assert.doesNotMatch(invocation[1].at(-1), /CommandLine/);
   assert.equal(invocation[0], "C:\\Program Files\\PowerShell\\7\\pwsh.exe");

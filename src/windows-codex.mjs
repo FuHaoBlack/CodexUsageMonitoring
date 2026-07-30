@@ -13,7 +13,7 @@ const APPX_COMMAND = [
   "$applications = @($manifest.Package.Applications.Application | ForEach-Object { [pscustomobject]@{ Executable = [string]$_.Executable; EntryPoint = [string]$_.EntryPoint } })",
   "[pscustomobject]@{ InstallLocation = $package.InstallLocation; Version = $package.Version.ToString(); Applications = $applications } | ConvertTo-Json -Compress -Depth 4",
 ].join("; ");
-const PROCESS_COMMAND = "Get-CimInstance Win32_Process | Select-Object ProcessId, ExecutablePath | ConvertTo-Json -Compress";
+const PROCESS_COMMAND = "Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object ProcessId, ExecutablePath | ConvertTo-Json -Compress";
 
 function stdoutOf(result) {
   return typeof result === "string" ? result : result?.stdout;
