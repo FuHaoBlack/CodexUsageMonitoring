@@ -7,6 +7,7 @@
 
   let root = null;
   let toolbar = null;
+  let toolbarAnchor = null;
   let resizeObserver = null;
   let mutationObserver = null;
   let mutationTarget = null;
@@ -24,53 +25,47 @@
     return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
   }
 
-  function overlapArea(first, second) {
-    const width = Math.max(0, Math.min(first.right, second.right) - Math.max(first.left, second.left));
-    const height = Math.max(0, Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top));
-    return width * height;
+  function isHorizontalContainer(element, menuRect) {
+    if (!isVisible(element)) return false;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    const horizontalLayout = style.display.includes("grid")
+      || (style.display.includes("flex") && style.flexDirection !== "column" && style.flexDirection !== "column-reverse");
+    return horizontalLayout
+      && rect.top >= 0
+      && rect.top < 96
+      && rect.height >= menuRect.height
+      && rect.height <= 80
+      && rect.width >= window.innerWidth * 0.5;
   }
 
-  function overlapsSidebar(element, rect) {
-    const area = rect.width * rect.height;
-    if (!area) return false;
-    return [...document.querySelectorAll("aside, nav, [role='navigation']")]
-      .filter((sidebar) => sidebar !== element && isVisible(sidebar))
-      .some((sidebar) => overlapArea(rect, sidebar.getBoundingClientRect()) / area > 0.5);
-  }
+  function findMountPoint() {
+    const candidates = [];
+    for (const menuBar of document.querySelectorAll("[role='menubar']")) {
+      if (!isVisible(menuBar)) continue;
+      const menuRect = menuBar.getBoundingClientRect();
+      const visibleItems = [...menuBar.querySelectorAll("[role='menuitem']")].filter(isVisible);
+      if (menuRect.top < 0 || menuRect.top >= 96 || menuRect.height > 80 || visibleItems.length < 2) continue;
 
-  function findToolbar() {
-    const candidates = [...document.querySelectorAll("header, [role='banner'], *")]
-      .filter((element) => {
-        if (!isVisible(element) || element.closest("aside, nav, [role='navigation']")) return false;
-        const style = window.getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        const isDragRegion = style.webkitAppRegion === "drag" || style.getPropertyValue("-webkit-app-region") === "drag";
-        return (element.matches("header, [role='banner']") || isDragRegion)
-          && rect.top >= 0
-          && rect.top < 96
-          && rect.height >= 28
-          && rect.height <= 80
-          && rect.width >= window.innerWidth * 0.5;
-      })
-      .map((element) => {
-        const style = window.getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        let score = element.matches("header, [role='banner']") ? 4 : 0;
-        if (style.display.includes("flex") || style.display.includes("grid")) score += 3;
-        if ([...element.querySelectorAll("button")].some(isVisible)) score += 2;
-        if (Math.abs(window.innerWidth - rect.right) <= 24) score += 2;
-        if (overlapsSidebar(element, rect)) score -= 4;
-        return { element, score };
-      });
-    const highest = Math.max(...candidates.map(({ score }) => score), -Infinity);
-    const winners = candidates.filter((candidate) => candidate.score === highest);
-    return highest >= 5 && winners.length === 1 ? winners[0].element : null;
+      let anchor = menuBar;
+      let container = menuBar.parentElement;
+      while (container && container !== document.body && container !== document.documentElement) {
+        if (isHorizontalContainer(container, menuRect)) {
+          candidates.push({ container, anchor });
+          break;
+        }
+        anchor = container;
+        container = container.parentElement;
+      }
+    }
+    return candidates.length === 1 ? candidates[0] : null;
   }
 
   function removeRoot() {
     root?.remove();
     root = null;
     toolbar = null;
+    toolbarAnchor = null;
     mode = null;
     document.querySelectorAll(ROOT_SELECTOR).forEach((element) => element.remove());
   }
@@ -127,13 +122,14 @@
 
   function mount() {
     ensureMutationObserver();
-    const nextToolbar = findToolbar();
-    if (!nextToolbar) {
+    const mountPoint = findMountPoint();
+    if (!mountPoint) {
       removeRoot();
       return false;
     }
-    toolbar = nextToolbar;
-    if (!root || root.parentElement !== toolbar) {
+    toolbar = mountPoint.container;
+    toolbarAnchor = mountPoint.anchor;
+    if (!root || root.parentElement !== toolbar || root.previousElementSibling !== toolbarAnchor) {
       root?.remove();
       document.querySelectorAll(ROOT_SELECTOR).forEach((element) => element.remove());
       root = document.createElement("div");
@@ -148,7 +144,7 @@
       measure.setAttribute("data-codex-usage-measure", "");
       measure.style.cssText = "position: fixed; visibility: hidden; white-space: nowrap; width: max-content;";
       root.append(full, compact, measure);
-      toolbar.append(root);
+      toolbar.insertBefore(root, toolbarAnchor.nextSibling);
     }
     const full = root.querySelector("[data-codex-usage-full]");
     const compact = root.querySelector("[data-codex-usage-compact]");
@@ -176,7 +172,7 @@
         || fullText !== expectedFullText
         || compactText !== expectedCompactText
       ) return;
-      if (!root?.isConnected || root.parentElement !== toolbar) mount();
+      if (!root?.isConnected || root.parentElement !== toolbar || root.previousElementSibling !== toolbarAnchor) mount();
       else {
         bindResizeObserver();
         chooseMode();

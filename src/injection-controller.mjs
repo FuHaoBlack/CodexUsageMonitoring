@@ -34,7 +34,6 @@ export function createInjectionController(session, injectSource, logger) {
       if (latestDisplay) return update(latestDisplay);
       const result = await evaluate("globalThis.__codexUsageToolbarV1?.status?.() ?? {\"mounted\":false,\"mode\":null}");
       const status = result && typeof result === "object" ? result : NOT_MOUNTED;
-      if (!status.mounted) logEvent(logger, "toolbar_anchor_not_found");
       return { mounted: Boolean(status.mounted), mode: status.mode ?? null };
     } catch {
       logEvent(logger, "toolbar_injection_unavailable");
