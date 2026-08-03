@@ -24,10 +24,10 @@
 
 - 修改：`tests/injection-contract.test.mjs`
 
-- [ ] 构造不含固定文案、ID 和类名的最小 DOM，执行真实 `inject.js`，验证组件插入语义菜单分支之后。
-- [ ] 构造只有聊天 `header`、没有 `menubar` 的 DOM，验证组件拒绝挂载。
-- [ ] 验证 `install()` 在没有展示文本时不记录 `toolbar_anchor_not_found`，而 `update()` 尝试失败时记录。
-- [ ] 运行 `node --test tests/injection-contract.test.mjs`，确认新测试因旧行为失败。
+- [x] 构造不含固定文案、ID 和类名的最小 DOM，执行真实 `inject.js`，验证组件插入语义菜单分支之后。
+- [x] 构造只有聊天 `header`、没有 `menubar` 的 DOM，验证组件拒绝挂载。
+- [x] 验证 `install()` 在没有展示文本时不记录 `toolbar_anchor_not_found`，而 `update()` 尝试失败时记录。
+- [x] 运行 `node --test tests/injection-contract.test.mjs`，确认新测试因旧行为失败。
 
 ### 任务 2：最小实现
 
@@ -36,10 +36,10 @@
 - 修改：`src/inject.js`
 - 修改：`src/injection-controller.mjs`
 
-- [ ] 用 `role="menubar"`、可见性、顶部位置、横向布局、容器宽高与唯一性替换旧 header/banner/drag 评分。
-- [ ] 在承载容器内将组件插入菜单直属分支之后，并让 MutationObserver 恢复同一相对位置。
-- [ ] 移除 `install()` 阶段的锚点缺失误报，只在 `update()` 的实际挂载失败中保留该事件。
-- [ ] 运行聚焦测试、语法检查和全量测试，确认全部通过。
+- [x] 用 `role="menubar"`、可见性、顶部位置、横向布局、容器宽高与唯一性替换旧 header/banner/drag 评分。
+- [x] 在承载容器内将组件插入菜单直属分支之后，并让 MutationObserver 恢复同一相对位置。
+- [x] 移除 `install()` 阶段的锚点缺失误报，只在 `update()` 的实际挂载失败中保留该事件。
+- [x] 运行聚焦测试、语法检查和全量测试，确认全部通过。
 
 ### 任务 3：安装副本与无重启运行态验证
 
@@ -47,7 +47,7 @@
 
 - 更新用户级安装副本中的项目文件，不修改官方 Codex 文件。
 
-- [ ] 运行安装脚本更新副本并执行已安装文件一致性验证。
+- [x] 运行安装脚本更新副本并执行已安装文件一致性验证。
 - [ ] 通过现有 `127.0.0.1` CDP 会话临时执行本次注入脚本与受控展示快照，验证唯一根节点位于顶部菜单分支之后；随后清除临时展示。
 - [ ] 不发送业务请求，不关闭或重启 Codex。
 
@@ -58,7 +58,7 @@
 - 修改：`README.md`
 - 修改：Task 9 运行态记录与执行进度文档。
 
-- [ ] 记录兼容策略、验证边界和仍需等待 Codex 官方刷新才能取得真实用量的限制。
+- [x] 记录兼容策略、验证边界和仍需等待 Codex 官方刷新才能取得真实用量的限制。
 - [ ] 运行统一验证、`git diff --check`、工作树范围检查和自我代码复核。
 - [ ] 使用中文提交信息提交本次修复。
 - [ ] 完成剩余真实验收后推送分支并创建草稿 PR。
