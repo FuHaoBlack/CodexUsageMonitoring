@@ -23,5 +23,6 @@ test("install preview generates a fixed local shortcut icon instead of referenci
 
   assert.equal(stderr, "");
   assert.match(stdout, /CodexUsageToolbar\.install-[a-f0-9]+\\assets\\Codex\.ico/i);
+  assert.match(stdout, /从当前 Codex 官方 AppX 资源生成固定多尺寸图标/);
   assert.doesNotMatch(stdout, /WindowsApps\\OpenAI\.Codex_/i);
 });
