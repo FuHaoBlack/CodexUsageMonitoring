@@ -23,7 +23,7 @@ function Get-ExactChildPath([string]$Parent, [string]$Leaf, [string]$Label) {
     return $candidate
 }
 
-function Get-CodexIconAssets {
+function Get-CodexIconPath {
     $package = Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue |
         Sort-Object Version -Descending |
         Select-Object -First 1
@@ -31,25 +31,18 @@ function Get-CodexIconAssets {
         throw '未找到官方 Codex AppX 安装信息，无法创建带官方图标的快捷方式。'
     }
 
-    $manifest = Get-AppxPackageManifest -Package $package
-    $application = @($manifest.Package.Applications.Application |
-        Where-Object { [string]$_.EntryPoint -eq 'Windows.FullTrustApplication' } |
-        Select-Object -First 1)
-    if ($application.Count -ne 1) {
-        throw '未找到官方 Codex AppX 的主应用清单，无法创建带官方图标的快捷方式。'
-    }
-    $square44Logo = [string]$application[0].VisualElements.Square44x44Logo
-    if ([string]::IsNullOrWhiteSpace($square44Logo)) {
-        throw '官方 Codex AppX 清单未声明 Square44x44Logo，无法创建带官方图标的快捷方式。'
-    }
-
     $themeValue = Get-ItemPropertyValue -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' `
         -Name AppsUseLightTheme -ErrorAction SilentlyContinue
     $appsUseLightTheme = $null -eq $themeValue -or [int]$themeValue -ne 0
-    return @(Get-CodexLogoAssetPaths `
-        -InstallLocation $package.InstallLocation `
-        -Square44Logo $square44Logo `
-        -UseLightTheme $appsUseLightTheme)
+    $iconName = if ($appsUseLightTheme) { 'chatgpt-tray-light.ico' } else { 'chatgpt-tray-dark.ico' }
+    $iconPath = [IO.Path]::GetFullPath((Join-Path $package.InstallLocation "app\resources\$iconName"))
+    $installRoot = [IO.Path]::GetFullPath($package.InstallLocation).TrimEnd('\', '/')
+    if (-not $iconPath.StartsWith($installRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath $iconPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $iconPath).Length -le 0) {
+        throw "未找到官方 Codex AppX 的 $iconName，无法创建带官方图标的快捷方式。"
+    }
+    return $iconPath
 }
 
 $sourceRootPath = Normalize-Path $SourceRoot
@@ -64,13 +57,11 @@ foreach ($sourceDirectory in $sourceDirectories) {
 
 $sourceLauncher = Get-ExactChildPath $sourceSrcRoot 'launcher.mjs' '源启动模块'
 $sourceStartScript = Get-ExactChildPath $sourceScriptsRoot 'start.ps1' '源启动脚本'
-$sourceIconTools = Get-ExactChildPath $sourceScriptsRoot 'icon-tools.ps1' '官方图标工具'
-foreach ($sourceFile in @($sourceLauncher, $sourceStartScript, $sourceIconTools)) {
+foreach ($sourceFile in @($sourceLauncher, $sourceStartScript)) {
     if (-not (Test-Path -LiteralPath $sourceFile -PathType Leaf)) {
         throw "缺少必需源文件：$sourceFile"
     }
 }
-. $sourceIconTools
 
 $sourceFiles = @()
 foreach ($sourceDirectory in $sourceDirectories) {
@@ -106,13 +97,13 @@ $desktopShortcutPath = if ([string]::IsNullOrWhiteSpace($desktopRoot)) {
 
 if ($WhatIfPreference) {
     [void]$PSCmdlet.ShouldProcess($temporaryRoot, '复制并验证临时安装目录')
-    [void]$PSCmdlet.ShouldProcess($temporaryIconPath, '从当前 Codex 官方 AppX 资源生成固定多尺寸图标')
+    [void]$PSCmdlet.ShouldProcess($temporaryIconPath, '复制当前 Codex 官方 ICO 到固定路径')
     [void]$PSCmdlet.ShouldProcess($installRoot, '替换当前用户的 CodexUsageToolbar 安装目录')
     [void]$PSCmdlet.ShouldProcess($shortcutPath, '创建 Codex（用量显示）开始菜单快捷方式')
     return
 }
 
-$sourceIconPaths = @(Get-CodexIconAssets)
+$sourceIconPath = Get-CodexIconPath
 $powerShellTarget = 'C:\Program Files\PowerShell\7\pwsh.exe'
 if (-not (Test-Path -LiteralPath $powerShellTarget -PathType Leaf)) {
     throw '未找到固定的 PowerShell 7 启动程序，无法创建快捷方式。'
@@ -143,10 +134,10 @@ try {
     }
 
     [IO.Directory]::CreateDirectory($temporaryAssetsRoot) | Out-Null
-    Write-PngIcon -PngPaths $sourceIconPaths -Destination $temporaryIconPath
+    Copy-Item -LiteralPath $sourceIconPath -Destination $temporaryIconPath -Force
     if (-not (Test-Path -LiteralPath $temporaryIconPath -PathType Leaf) -or
         (Get-Item -LiteralPath $temporaryIconPath).Length -le 0) {
-        throw '固定快捷方式图标生成失败。'
+        throw '固定快捷方式图标复制失败。'
     }
 
     if (-not $PSCmdlet.ShouldProcess($installRoot, '替换当前用户的 CodexUsageToolbar 安装目录')) { return }
