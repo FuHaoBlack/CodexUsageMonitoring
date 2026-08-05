@@ -72,6 +72,10 @@ if ([string]::IsNullOrWhiteSpace($localAppData) -or [string]::IsNullOrWhiteSpace
 
 $installRoot = Get-ExactChildPath $localAppData 'CodexUsageToolbar' '安装目录'
 $temporaryRoot = Get-ExactChildPath $localAppData ("CodexUsageToolbar.install-$([guid]::NewGuid().ToString('N'))") '临时安装目录'
+$temporaryAssetsRoot = Get-ExactChildPath $temporaryRoot 'assets' '临时资源目录'
+$temporaryIconPath = Get-ExactChildPath $temporaryAssetsRoot 'Codex.ico' '临时快捷方式图标'
+$installedAssetsRoot = Get-ExactChildPath $installRoot 'assets' '已安装资源目录'
+$installedIconPath = Get-ExactChildPath $installedAssetsRoot 'Codex.ico' '已安装快捷方式图标'
 $microsoftRoot = Get-ExactChildPath $appData 'Microsoft' '开始菜单 Microsoft 目录'
 $windowsRoot = Get-ExactChildPath $microsoftRoot 'Windows' '开始菜单 Windows 目录'
 $startMenuRoot = Get-ExactChildPath $windowsRoot 'Start Menu' '开始菜单目录'
@@ -80,12 +84,13 @@ $shortcutPath = Get-ExactChildPath $programsRoot 'Codex（用量显示）.lnk' '
 
 if ($WhatIfPreference) {
     [void]$PSCmdlet.ShouldProcess($temporaryRoot, '复制并验证临时安装目录')
+    [void]$PSCmdlet.ShouldProcess($temporaryIconPath, '从当前 Codex 提取固定快捷方式图标')
     [void]$PSCmdlet.ShouldProcess($installRoot, '替换当前用户的 CodexUsageToolbar 安装目录')
     [void]$PSCmdlet.ShouldProcess($shortcutPath, '创建 Codex（用量显示）开始菜单快捷方式')
     return
 }
 
-$iconPath = Get-CodexIconPath
+$sourceIconPath = Get-CodexIconPath
 $powerShellTarget = 'C:\Program Files\PowerShell\7\pwsh.exe'
 if (-not (Test-Path -LiteralPath $powerShellTarget -PathType Leaf)) {
     throw '未找到固定的 PowerShell 7 启动程序，无法创建快捷方式。'
@@ -113,6 +118,26 @@ try {
         if (-not (Test-Path -LiteralPath $installedFile -PathType Leaf)) {
             throw "临时安装校验失败，缺少文件：$relativePath"
         }
+    }
+
+    [IO.Directory]::CreateDirectory($temporaryAssetsRoot) | Out-Null
+    $icon = $null
+    $iconStream = $null
+    try {
+        Add-Type -AssemblyName System.Drawing.Common
+        $icon = [Drawing.Icon]::ExtractAssociatedIcon($sourceIconPath)
+        if ($null -eq $icon) {
+            throw '无法从当前 Codex 提取快捷方式图标。'
+        }
+        $iconStream = [IO.File]::Open($temporaryIconPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $icon.Save($iconStream)
+    } finally {
+        if ($null -ne $iconStream) { $iconStream.Dispose() }
+        if ($null -ne $icon) { $icon.Dispose() }
+    }
+    if (-not (Test-Path -LiteralPath $temporaryIconPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $temporaryIconPath).Length -le 0) {
+        throw '固定快捷方式图标生成失败。'
     }
 
     if (-not $PSCmdlet.ShouldProcess($installRoot, '替换当前用户的 CodexUsageToolbar 安装目录')) { return }
@@ -148,7 +173,7 @@ try {
         $installedStartScript = Get-ExactChildPath $installedScriptsRoot 'start.ps1' '已安装启动脚本'
         $shortcutCom.Arguments = '-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $installedStartScript + '"'
         $shortcutCom.WorkingDirectory = $installRoot
-        $shortcutCom.IconLocation = "$iconPath,0"
+        $shortcutCom.IconLocation = "$installedIconPath,0"
         $shortcutCom.Save()
     } finally {
         try {

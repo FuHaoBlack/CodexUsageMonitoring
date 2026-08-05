@@ -84,6 +84,7 @@ $expectedFiles = @(
     'scripts/verify.ps1',
     'tests/cdp-session.test.mjs',
     'tests/injection-contract.test.mjs',
+    'tests/install-script.test.mjs',
     'tests/logger.test.mjs',
     'tests/source-policy.test.mjs',
     'tests/usage-observer.test.mjs',
@@ -174,6 +175,12 @@ if (-not [string]::IsNullOrWhiteSpace($InstalledRoot)) {
         $installedRootPath = [IO.Path]::GetFullPath($InstalledRoot)
         if (-not (Test-Path -LiteralPath $installedRootPath -PathType Container)) {
             throw "安装目录不存在：$installedRootPath"
+        }
+        $installedIconPath = Join-Path $installedRootPath 'assets\Codex.ico'
+        if (-not (Test-Path -LiteralPath $installedIconPath -PathType Leaf)) {
+            Add-VerificationFailure '已安装副本缺少固定快捷方式图标：assets/Codex.ico'
+        } elseif ((Get-Item -LiteralPath $installedIconPath).Length -le 0) {
+            Add-VerificationFailure '已安装固定快捷方式图标为空：assets/Codex.ico'
         }
         $sourceFiles = @(
             Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src') -Recurse -File -ErrorAction Stop
