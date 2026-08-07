@@ -129,6 +129,19 @@ test("selects only a non-DevTools local page target", async () => {
   assert.deepEqual(target, { webSocketDebuggerUrl: "ws://127.0.0.1:4567/page" });
 });
 
+test("prefers the Codex main page over the in-app browser and overlay targets", async () => {
+  const target = await waitForCdpTarget(4567, {
+    timeoutMs: 20,
+    retryMs: 1,
+    fetch: async () => ({ ok: true, json: async () => [
+      { type: "page", url: "http://localhost:60954/", webSocketDebuggerUrl: "ws://127.0.0.1:4567/browser" },
+      { type: "page", url: "app://-/index.html?initialRoute=%2Favatar-overlay", webSocketDebuggerUrl: "ws://127.0.0.1:4567/overlay" },
+      { type: "page", url: "app://-/index.html", webSocketDebuggerUrl: "ws://127.0.0.1:4567/main" },
+    ] }),
+  });
+  assert.deepEqual(target, { webSocketDebuggerUrl: "ws://127.0.0.1:4567/main" });
+});
+
 test("times out when no eligible CDP target appears", async () => {
   await assert.rejects(waitForCdpTarget(4567, {
     timeoutMs: 5,

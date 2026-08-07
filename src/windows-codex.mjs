@@ -118,6 +118,13 @@ function validTarget(target, port) {
   } catch { return false; }
 }
 
+function targetPriority(target) {
+  if (target.url === "app://-/index.html") return 0;
+  if (target.url.startsWith("app://-/index.html?")) return 1;
+  if (target.url === "http://localhost:60954/" || target.url.startsWith("http://localhost:60954/")) return 3;
+  return 2;
+}
+
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 async function beforeDeadline(factory, deadline) {
@@ -143,7 +150,9 @@ export async function waitForCdpTarget(port, { timeoutMs = 15000, retryMs = 250,
       const response = await beforeDeadline((signal) => fetchImpl(endpoint, { signal, redirect: "error" }), deadline);
       if (response?.ok) {
         const targets = await beforeDeadline(() => response.json(), deadline);
-        const target = Array.isArray(targets) ? targets.find((candidate) => validTarget(candidate, port)) : null;
+        const target = Array.isArray(targets)
+          ? targets.filter((candidate) => validTarget(candidate, port)).sort((left, right) => targetPriority(left) - targetPriority(right))[0]
+          : null;
         if (target) return { webSocketDebuggerUrl: target.webSocketDebuggerUrl };
       }
     } catch (error) {

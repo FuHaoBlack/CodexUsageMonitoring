@@ -47,6 +47,92 @@ test("reads an existing official usage response body", async () => {
   });
 });
 
+test("starts native Codex fetch-response observation without issuing a request", async () => {
+  const calls = [];
+  const observer = new UsageObserver({
+    async send(method, params) {
+      calls.push({ method, params });
+      return {};
+    },
+  });
+
+  await observer.start();
+
+  assert.deepEqual(calls.map(({ method }) => method), [
+    "Network.enable",
+    "Runtime.enable",
+    "Runtime.addBinding",
+    "Runtime.evaluate",
+  ]);
+  assert.equal(calls[2].params.name, "codexUsageObserverV1");
+  assert.match(calls[3].params.expression, /codex-message-from-view/);
+  assert.match(calls[3].params.expression, /fetch-response/);
+});
+
+test("routes an official native usage response by its fetch request id", async () => {
+  const payloads = [];
+  const observer = new UsageObserver({ async send() {} }, {
+    onUsagePayload: (payload) => payloads.push(payload),
+    onResetCreditsPayload: assert.fail,
+    onError: assert.fail,
+  });
+
+  await observer.handleEvent("Runtime.bindingCalled", {
+    name: "codexUsageObserverV1",
+    payload: JSON.stringify({
+      kind: "request",
+      requestId: "bridge-usage-1",
+      method: "GET",
+      url: "/wham/usage",
+    }),
+  });
+  const payload = { rate_limit: { primary_window: { used_percent: 79, limit_window_seconds: 604800, reset_at: 1785902940 } } };
+  await observer.handleEvent("Runtime.bindingCalled", {
+    name: "codexUsageObserverV1",
+    payload: JSON.stringify({
+      kind: "response",
+      requestId: "bridge-usage-1",
+      responseType: "success",
+      status: 200,
+      bodyJsonString: JSON.stringify(payload),
+    }),
+  });
+
+  assert.deepEqual(payloads, [payload]);
+});
+
+test("routes an official native reset-credit response by its fetch request id", async () => {
+  const payloads = [];
+  const observer = new UsageObserver({ async send() {} }, {
+    onUsagePayload: assert.fail,
+    onResetCreditsPayload: (payload) => payloads.push(payload),
+    onError: assert.fail,
+  });
+
+  await observer.handleEvent("Runtime.bindingCalled", {
+    name: "codexUsageObserverV1",
+    payload: JSON.stringify({
+      kind: "request",
+      requestId: "bridge-reset-1",
+      method: "GET",
+      url: "/wham/rate-limit-reset-credits",
+    }),
+  });
+  const payload = { available_count: 1, credits: [] };
+  await observer.handleEvent("Runtime.bindingCalled", {
+    name: "codexUsageObserverV1",
+    payload: JSON.stringify({
+      kind: "response",
+      requestId: "bridge-reset-1",
+      responseType: "success",
+      status: 200,
+      bodyJsonString: JSON.stringify(payload),
+    }),
+  });
+
+  assert.deepEqual(payloads, [payload]);
+});
+
 test("ignores lookalike hosts and unrelated paths", async () => {
   let bodyReads = 0;
   const observer = new UsageObserver({
