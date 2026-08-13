@@ -59,6 +59,16 @@ function endpointFor(url) {
   return null;
 }
 
+function endpointForNativeRequest(event) {
+  const endpointFromUrl = endpointFor(event?.url);
+  const endpointMarker = event?.endpoint;
+  if (
+    (endpointMarker === "usage" || endpointMarker === "resetCredits") &&
+    endpointMarker === endpointFromUrl
+  ) return endpointMarker;
+  return endpointFromUrl;
+}
+
 export class UsageObserver {
   constructor(session, { onUsagePayload = () => {}, onResetCreditsPayload = () => {}, onError = () => {} } = {}) {
     this.session = session;
@@ -149,7 +159,7 @@ export class UsageObserver {
     try { event = JSON.parse(params.payload); } catch { return; }
     const requestId = event?.requestId;
     if (event?.kind === "request") {
-      const endpoint = endpointFor(event.endpoint ?? event.url);
+      const endpoint = endpointForNativeRequest(event);
       if (event.method === "GET" && typeof requestId === "string" && endpoint) {
         this.nativeRequests.set(requestId, endpoint);
       }

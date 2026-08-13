@@ -101,6 +101,39 @@ test("routes an official native usage response by its fetch request id", async (
   assert.deepEqual(payloads, [payload]);
 });
 
+test("routes native usage responses when the bridge supplies an endpoint marker", async () => {
+  const payloads = [];
+  const observer = new UsageObserver({ async send() {} }, {
+    onUsagePayload: (payload) => payloads.push(payload),
+    onResetCreditsPayload: assert.fail,
+    onError: assert.fail,
+  });
+
+  await observer.handleEvent("Runtime.bindingCalled", {
+    name: "codexUsageObserverV1",
+    payload: JSON.stringify({
+      kind: "request",
+      requestId: "bridge-usage-marker-1",
+      method: "GET",
+      url: "/wham/usage",
+      endpoint: "usage",
+    }),
+  });
+  const payload = { rate_limit: { primary_window: { used_percent: 21, limit_window_seconds: 604800, reset_at: 1786100000 } } };
+  await observer.handleEvent("Runtime.bindingCalled", {
+    name: "codexUsageObserverV1",
+    payload: JSON.stringify({
+      kind: "response",
+      requestId: "bridge-usage-marker-1",
+      responseType: "success",
+      status: 200,
+      bodyJsonString: JSON.stringify(payload),
+    }),
+  });
+
+  assert.deepEqual(payloads, [payload]);
+});
+
 test("routes an official native reset-credit response by its fetch request id", async () => {
   const payloads = [];
   const observer = new UsageObserver({ async send() {} }, {
