@@ -90,6 +90,20 @@
     return Math.max(0, contentWidth - occupied);
   }
 
+  function syncMenuTypography() {
+    if (!root || !toolbarAnchor) return;
+    const reference = toolbarAnchor.querySelector?.("[role='menuitem']");
+    if (!reference) return;
+    try {
+      const style = window.getComputedStyle(reference);
+      if (style.font) root.style.font = style.font;
+      else if (style.fontSize) root.style.fontSize = style.fontSize;
+      if (style.color) root.style.color = style.color;
+    } catch {
+      // 菜单样式读取失败时保留继承样式，不影响用量展示。
+    }
+  }
+
   function measureFullWidth(measure) {
     const originalStyle = root.style.cssText;
     try {
@@ -102,6 +116,7 @@
 
   function chooseMode() {
     if (!root || !toolbar || !root.isConnected) return;
+    syncMenuTypography();
     const measure = root.querySelector("[data-codex-usage-measure]");
     const full = root.querySelector("[data-codex-usage-full]");
     const compact = root.querySelector("[data-codex-usage-compact]");
@@ -135,14 +150,16 @@
       root = document.createElement("div");
       root.setAttribute("data-codex-usage-toolbar", "v1");
       root.setAttribute("aria-live", "polite");
-      root.style.cssText = "pointer-events: none; user-select: none; white-space: nowrap; flex: 0 1 auto; min-width: 0; font: inherit; color: var(--text-primary, currentColor); -webkit-app-region: drag;";
+      root.style.cssText = "pointer-events: none; user-select: none; white-space: nowrap; flex: 0 1 auto; min-width: 0; font: inherit; color: inherit; -webkit-app-region: drag;";
       const full = document.createElement("span");
       full.setAttribute("data-codex-usage-full", "");
+      full.style.cssText = "font: inherit; color: inherit;";
       const compact = document.createElement("span");
       compact.setAttribute("data-codex-usage-compact", "");
+      compact.style.cssText = "font: inherit; color: inherit;";
       const measure = document.createElement("span");
       measure.setAttribute("data-codex-usage-measure", "");
-      measure.style.cssText = "position: fixed; visibility: hidden; white-space: nowrap; width: max-content;";
+      measure.style.cssText = "position: fixed; visibility: hidden; white-space: nowrap; width: max-content; font: inherit; color: inherit;";
       root.append(full, compact, measure);
       toolbar.insertBefore(root, toolbarAnchor.nextSibling);
     }
