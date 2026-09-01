@@ -25,18 +25,12 @@
     return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
   }
 
-  function isHorizontalContainer(element, menuRect) {
+  function isHorizontalContainer(element) {
     if (!isVisible(element)) return false;
     const style = window.getComputedStyle(element);
-    const rect = element.getBoundingClientRect();
     const horizontalLayout = style.display.includes("grid")
       || (style.display.includes("flex") && style.flexDirection !== "column" && style.flexDirection !== "column-reverse");
-    return horizontalLayout
-      && rect.top >= 0
-      && rect.top < 96
-      && rect.height >= menuRect.height
-      && rect.height <= 80
-      && rect.width >= window.innerWidth * 0.5;
+    return horizontalLayout;
   }
 
   function findMountPoint() {
@@ -45,20 +39,32 @@
       if (!isVisible(menuBar)) continue;
       const menuRect = menuBar.getBoundingClientRect();
       const visibleItems = [...menuBar.querySelectorAll("[role='menuitem']")].filter(isVisible);
-      if (menuRect.top < 0 || menuRect.top >= 96 || menuRect.height > 80 || visibleItems.length < 2) continue;
+      const viewportHeight = Number.isFinite(window.innerHeight) ? window.innerHeight : Number.POSITIVE_INFINITY;
+      if (menuRect.bottom < 0 || menuRect.top > viewportHeight || visibleItems.length === 0) continue;
 
-      let anchor = menuBar;
       let container = menuBar.parentElement;
+      let horizontalContainer = null;
       while (container && container !== document.body && container !== document.documentElement) {
-        if (isHorizontalContainer(container, menuRect)) {
-          candidates.push({ container, anchor });
+        if (isHorizontalContainer(container)) {
+          horizontalContainer = container;
           break;
         }
-        anchor = container;
         container = container.parentElement;
       }
+      if (horizontalContainer) {
+        candidates.push({ container: horizontalContainer, anchor: menuBar, priority: 0 });
+      } else {
+        candidates.push({ container: menuBar, anchor: visibleItems.at(-1), priority: 1 });
+      }
     }
-    return candidates.length === 1 ? candidates[0] : null;
+    return candidates.sort((left, right) => {
+      const leftRect = left.container.getBoundingClientRect();
+      const rightRect = right.container.getBoundingClientRect();
+      return left.priority - right.priority
+        || leftRect.top - rightRect.top
+        || rightRect.width - leftRect.width
+        || leftRect.left - rightRect.left;
+    })[0] ?? null;
   }
 
   function removeRoot() {
@@ -92,7 +98,9 @@
 
   function syncMenuTypography() {
     if (!root || !toolbarAnchor) return;
-    const reference = toolbarAnchor.querySelector?.("[role='menuitem']");
+    const reference = toolbarAnchor.matches?.("[role='menuitem']")
+      ? toolbarAnchor
+      : toolbarAnchor.querySelector?.("[role='menuitem']");
     if (!reference) return;
     try {
       const style = window.getComputedStyle(reference);
@@ -150,7 +158,7 @@
       root = document.createElement("div");
       root.setAttribute("data-codex-usage-toolbar", "v1");
       root.setAttribute("aria-live", "polite");
-      root.style.cssText = "pointer-events: none; user-select: none; white-space: nowrap; flex: 0 1 auto; min-width: 0; font: inherit; color: inherit; -webkit-app-region: drag;";
+      root.style.cssText = "display: inline-flex; align-items: center; pointer-events: none; user-select: none; white-space: nowrap; flex: 0 1 auto; min-width: 0; font: inherit; color: inherit; -webkit-app-region: drag;";
       const full = document.createElement("span");
       full.setAttribute("data-codex-usage-full", "");
       full.style.cssText = "font: inherit; color: inherit;";
