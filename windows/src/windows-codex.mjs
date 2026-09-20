@@ -10,7 +10,7 @@ const APPX_COMMAND = [
   "$package = Get-AppxPackage -Name OpenAI.Codex | Sort-Object Version -Descending | Select-Object -First 1",
   "if ($null -eq $package) { $null | ConvertTo-Json -Compress; return }",
   "$manifest = Get-AppxPackageManifest -Package $package",
-  "$applications = @($manifest.Package.Applications.Application | ForEach-Object { [pscustomobject]@{ Executable = [string]$_.Executable; EntryPoint = [string]$_.EntryPoint } })",
+  "$applications = @($manifest.Package.Applications.Application | Where-Object { $appListEntry = [string]$_.VisualElements.AppListEntry; [string]::IsNullOrWhiteSpace($appListEntry) -or $appListEntry -ine 'none' } | ForEach-Object { [pscustomobject]@{ Executable = [string]$_.Executable; EntryPoint = [string]$_.EntryPoint } })",
   "[pscustomobject]@{ InstallLocation = $package.InstallLocation; Version = $package.Version.ToString(); Applications = $applications } | ConvertTo-Json -Compress -Depth 4",
 ].join("; ");
 const PROCESS_COMMAND = "Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object ProcessId, ExecutablePath | ConvertTo-Json -Compress";
