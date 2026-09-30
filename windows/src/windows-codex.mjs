@@ -13,7 +13,7 @@ const APPX_COMMAND = [
   "$applications = @($manifest.Package.Applications.Application | Where-Object { $appListEntry = [string]$_.VisualElements.AppListEntry; [string]::IsNullOrWhiteSpace($appListEntry) -or $appListEntry -ine 'none' } | ForEach-Object { [pscustomobject]@{ Executable = [string]$_.Executable; EntryPoint = [string]$_.EntryPoint } })",
   "[pscustomobject]@{ InstallLocation = $package.InstallLocation; Version = $package.Version.ToString(); Applications = $applications } | ConvertTo-Json -Compress -Depth 4",
 ].join("; ");
-const PROCESS_COMMAND = "Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object ProcessId, ExecutablePath | ConvertTo-Json -Compress";
+const PROCESS_COMMAND = "Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ ProcessId = [int]$_.Id; ExecutablePath = [string]$_.Path } } | ConvertTo-Json -Compress";
 
 function stdoutOf(result) {
   return typeof result === "string" ? result : result?.stdout;
@@ -98,7 +98,10 @@ export function reserveLoopbackPort() {
 
 export function launchCodex(exePath, port, { spawn = spawnChild } = {}) {
   validatePort(port);
-  return spawn(exePath, ["--remote-debugging-address=127.0.0.1", `--remote-debugging-port=${port}`], {
+  const appData = process.env.APPDATA;
+  if (typeof appData !== "string" || !path.win32.isAbsolute(appData)) throw new Error("无法确定 Codex 用户数据目录");
+  const userDataDir = path.win32.join(appData, "Codex", "web", "Codex");
+  return spawn(exePath, ["--remote-debugging-address=127.0.0.1", `--remote-debugging-port=${port}`, `--user-data-dir=${userDataDir}`], {
     detached: false,
     stdio: "ignore",
     windowsHide: true,

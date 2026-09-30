@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
+import path from "node:path";
 import {
   parseAppxDiscoveryOutput,
   discoverCodexInstallation,
@@ -73,8 +74,8 @@ test("returns only the exact manifest executable process using Windows path sema
     },
   });
   assert.deepEqual(result, [{ pid: 42, executablePath: "c:\\apps\\CODEX\\app\\chatgpt.exe" }]);
-  assert.match(invocation[1].at(-1), /Get-CimInstance Win32_Process -ErrorAction Stop/);
-  assert.match(invocation[1].at(-1), /Select-Object ProcessId, ExecutablePath/);
+  assert.match(invocation[1].at(-1), /Get-Process -Name ChatGPT -ErrorAction SilentlyContinue/);
+  assert.match(invocation[1].at(-1), /ProcessId = \[int\]\$_.Id; ExecutablePath = \[string\]\$_.Path/);
   assert.doesNotMatch(invocation[1].at(-1), /CommandLine/);
   assert.equal(invocation[0], "C:\\Program Files\\PowerShell\\7\\pwsh.exe");
   assert.deepEqual(invocation[1].slice(0, 4), ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]);
@@ -102,7 +103,8 @@ test("launches with loopback-only CDP arguments and safe child options", () => {
   let captured;
   const child = { pid: 12 };
   assert.equal(launchCodex("C:\\Apps\\Codex.exe", 4567, { spawn: (...args) => { captured = args; return child; } }), child);
-  assert.deepEqual(captured, ["C:\\Apps\\Codex.exe", ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=4567"], {
+  const userDataDir = path.win32.join(process.env.APPDATA, "Codex", "web", "Codex");
+  assert.deepEqual(captured, ["C:\\Apps\\Codex.exe", ["--remote-debugging-address=127.0.0.1", "--remote-debugging-port=4567", `--user-data-dir=${userDataDir}`], {
     detached: false, stdio: "ignore", windowsHide: true,
   }]);
 });
