@@ -13,7 +13,7 @@ const APPX_COMMAND = [
   "$applications = @($manifest.Package.Applications.Application | Where-Object { $appListEntry = [string]$_.VisualElements.AppListEntry; [string]::IsNullOrWhiteSpace($appListEntry) -or $appListEntry -ine 'none' } | ForEach-Object { [pscustomobject]@{ Executable = [string]$_.Executable; EntryPoint = [string]$_.EntryPoint } })",
   "[pscustomobject]@{ InstallLocation = $package.InstallLocation; Version = $package.Version.ToString(); Applications = $applications } | ConvertTo-Json -Compress -Depth 4",
 ].join("; ");
-const PROCESS_COMMAND = "Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ ProcessId = [int]$_.Id; ExecutablePath = [string]$_.Path } } | ConvertTo-Json -Compress";
+const PROCESS_COMMAND = "$processes = @(Get-Process -ErrorAction Stop | Where-Object { $_.ProcessName -eq 'ChatGPT' } | ForEach-Object { [pscustomobject]@{ ProcessId = [int]$_.Id; ExecutablePath = [string]$_.Path } }); ConvertTo-Json -InputObject $processes -Compress";
 
 function stdoutOf(result) {
   return typeof result === "string" ? result : result?.stdout;

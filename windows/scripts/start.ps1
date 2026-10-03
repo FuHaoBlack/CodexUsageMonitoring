@@ -30,12 +30,14 @@ if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
     exit 4
 }
 
+$attemptStartedAt = [DateTime]::UtcNow
 & $node.Source $launcher
 $exitCode = $LASTEXITCODE
 
 if ($exitCode -ne 0) {
     $errorFile = [IO.Path]::GetFullPath((Join-Path $installRoot 'logs\last-error.txt'))
-    $message = if (Test-Path -LiteralPath $errorFile -PathType Leaf) {
+    $hasCurrentError = (Test-Path -LiteralPath $errorFile -PathType Leaf) -and ((Get-Item -LiteralPath $errorFile).LastWriteTimeUtc -ge $attemptStartedAt)
+    $message = if ($hasCurrentError) {
         Get-Content -LiteralPath $errorFile -Raw
     } else {
         "Codex 用量显示辅助程序已退出，错误代码：$exitCode"
