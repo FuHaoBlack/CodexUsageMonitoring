@@ -7,6 +7,7 @@ const NATIVE_BINDING_NAME = "codexUsageObserverV1";
 const CANDIDATE_PATH = /(?:usage|quota|rate[-_]?limit|credit|limit)/i;
 const MAX_CANDIDATE_BODY_BYTES = 512 * 1024;
 const RESPONSE_BODY_KIND = "response-body";
+const USAGE_PUSH_TOPIC = "codex-work-usage-push-v1";
 
 const NATIVE_BRIDGE_SOURCE = `(() => {
   const marker = "__codexUsageObserverV1Installed";
@@ -158,6 +159,29 @@ function responseMayContainJson(response, endpoint) {
   return mimeType.includes("json") || String(contentType ?? "").toLowerCase().includes("json");
 }
 
+function usageSnapshotsFromFrame(response) {
+  const body = response?.payloadData;
+  if (response?.opcode !== 1 || typeof body !== "string" || body.length > MAX_CANDIDATE_BODY_BYTES) return [];
+  if (Buffer.byteLength(body, "utf8") > MAX_CANDIDATE_BODY_BYTES) return [];
+
+  let messages;
+  try { messages = JSON.parse(body); } catch { return []; }
+  return (Array.isArray(messages) ? messages : [messages]).flatMap((message) => {
+    if (message?.type !== "message" || message.topic_id !== USAGE_PUSH_TOPIC || message.payload?.type !== "usage.snapshot") return [];
+    const snapshot = message.payload.payload;
+    const usage = snapshot?.usage_by_client?.electron;
+    if (
+      snapshot?.version !== 1 ||
+      !Number.isSafeInteger(snapshot.generated_at_ms) || snapshot.generated_at_ms < 0 ||
+      !Number.isSafeInteger(snapshot.sequence) || snapshot.sequence <= 0 ||
+      typeof snapshot.stream_id !== "string" || snapshot.stream_id.length === 0 ||
+      typeof usage?.account_id !== "string" || typeof usage?.user_id !== "string" ||
+      !parseUsagePayload(usage)
+    ) return [];
+    return [snapshot];
+  });
+}
+
 export class UsageObserver {
   constructor(session, { onUsagePayload = () => {}, onResetCreditsPayload = () => {}, onError = () => {} } = {}) {
     this.session = session;
@@ -166,6 +190,7 @@ export class UsageObserver {
     this.onError = onError;
     this.requests = new Map();
     this.nativeRequests = new Map();
+    this.latestUsagePush = null;
   }
 
   async start() {
@@ -176,6 +201,11 @@ export class UsageObserver {
   }
 
   async handleEvent(method, params) {
+    if (method === "Network.webSocketFrameReceived") {
+      await this.#handleUsagePush(params?.response);
+      return;
+    }
+
     if (method === "Runtime.bindingCalled") {
       await this.#handleNativeBinding(params);
       return;
@@ -234,6 +264,33 @@ export class UsageObserver {
         await this.onUsagePayload(payload);
       } else if (classification === "resetCredits") {
         await this.onResetCreditsPayload(payload);
+      }
+    } catch (error) {
+      await this.#notifyError(error);
+    }
+  }
+
+  async #handleUsagePush(response) {
+    try {
+      for (const snapshot of usageSnapshotsFromFrame(response)) {
+        const usage = snapshot.usage_by_client.electron;
+        const previous = this.latestUsagePush;
+        const sameIdentity = previous?.accountId === usage.account_id && previous?.userId === usage.user_id;
+        if (sameIdentity && (
+          snapshot.generated_at_ms <= previous.generatedAtMs ||
+          (snapshot.stream_id === previous.streamId && snapshot.sequence <= previous.sequence)
+        )) continue;
+
+        this.latestUsagePush = {
+          accountId: usage.account_id,
+          userId: usage.user_id,
+          generatedAtMs: snapshot.generated_at_ms,
+          streamId: snapshot.stream_id,
+          sequence: snapshot.sequence,
+        };
+        await this.onUsagePayload(usage);
+        const resetCredits = usage.rate_limit_reset_credits;
+        if (Array.isArray(resetCredits?.credits)) await this.onResetCreditsPayload(resetCredits);
       }
     } catch (error) {
       await this.#notifyError(error);
